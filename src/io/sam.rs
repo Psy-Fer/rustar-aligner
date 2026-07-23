@@ -1516,8 +1516,8 @@ mod tests {
         assert!(rgs.contains_key(&b"rg0"[..]));
         let map = rgs.get(&b"rg0"[..]).unwrap();
         // SM and LB should be present as other_fields
-        let sm_tag = HeaderOtherTag::<_>::try_from([b'S', b'M']).unwrap();
-        let lb_tag = HeaderOtherTag::<_>::try_from([b'L', b'B']).unwrap();
+        let sm_tag = HeaderOtherTag::<_>::try_from(*b"SM").unwrap();
+        let lb_tag = HeaderOtherTag::<_>::try_from(*b"LB").unwrap();
         let sm: &[u8] = map.other_fields().get(&sm_tag).unwrap().as_ref();
         let lb: &[u8] = map.other_fields().get(&lb_tag).unwrap().as_ref();
         assert_eq!(sm, b"sample0");
