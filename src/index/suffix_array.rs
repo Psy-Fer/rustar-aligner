@@ -275,7 +275,7 @@ mod tests {
         let first_base = genome.sequence[first_pos as usize];
 
         // In "AAB", the first suffix lexicographically is "A" (from pos 0 or 1)
-        assert!(first_base == 0); // A
+        assert_eq!(first_base, 0); // A
     }
 
     /// Differential: the caps-sa-backed builder must produce a `PackedArray`
