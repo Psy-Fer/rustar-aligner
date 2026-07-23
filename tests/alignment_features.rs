@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 /// LCG pseudo-random sequence generator (identical LCG to existing tests).
 fn lcg_seq(seed: u32, length: usize) -> Vec<u8> {
-    let bases: [u8; 4] = [b'A', b'C', b'G', b'T'];
+    let bases: [u8; 4] = *b"ACGT";
     let mut state = seed;
     let mut seq = Vec::with_capacity(length);
     for _ in 0..length {

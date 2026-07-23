@@ -1036,13 +1036,10 @@ fn align_to_one_transcript(
         } else {
             // Coalesce: extend the last projected exon by this block's length
             // (STAR adds block EX_L directly — does NOT update start position).
-            if let Some(last) = proj_exons.last_mut() {
-                let len = block_end - block_start;
-                last.genome_end += len;
-                last.read_end = block.read_end;
-            } else {
-                return None;
-            }
+            let last = proj_exons.last_mut()?;
+            let len = block_end - block_start;
+            last.genome_end += len;
+            last.read_end = block.read_end;
         }
 
         // Advance `ex` across any splice boundary BEFORE the next block,
