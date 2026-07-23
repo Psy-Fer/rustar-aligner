@@ -29,6 +29,10 @@ bitflags::bitflags! {
         /// `nM:i` — STAR's mismatch count (mismatches only, excluding indels). This
         /// is the tag in STAR's `Standard` preset (distinct from `NM`).
         const NMM = 1 << 11;
+        /// WASP allele-specific-mapping tags (require --waspOutputMode SAMtag).
+        const VW = 1 << 12;
+        const VA = 1 << 13;
+        const VG = 1 << 14;
 
         // STAR `Standard` = NH HI AS nM  (the mismatch count nM, NOT edit-distance NM).
         const STANDARD =
@@ -65,6 +69,9 @@ impl FromStr for SamAttributes {
             "RG" => Self::RG,
             "GX" => Self::GX,
             "GN" => Self::GN,
+            "vW" => Self::VW,
+            "vA" => Self::VA,
+            "vG" => Self::VG,
             other => return Err(format!("unknown --outSAMattributes token '{other}'")),
         })
     }
@@ -110,7 +117,7 @@ impl clap::Args for SamAttributes {
                 .default_values(["Standard"])
                 .help(
                     "SAM optional tags: Standard, All, None, or any combination of \
-                     NH HI AS NM nM MD jM jI XS RG.",
+                     NH HI AS NM nM MD jM jI XS RG vW vA vG.",
                 ),
         )
     }
