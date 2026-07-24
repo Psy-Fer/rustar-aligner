@@ -538,6 +538,10 @@ pub struct Parameters {
     #[arg(long = "outSAMprimaryFlag", default_value = "OneBestScore")]
     pub out_sam_primary_flag: OutSamPrimaryFlag,
 
+    /// Start value of the `HI` SAM attribute (STAR default 1; CellRanger convention uses 0)
+    #[arg(long = "outSAMattrIHstart", default_value_t = 1)]
+    pub out_sam_attr_ih_start: u32,
+
     /// Output filter type: Normal or BySJout
     #[arg(long = "outFilterType", default_value = "Normal")]
     pub out_filter_type: OutFilterType,
