@@ -691,6 +691,11 @@ pub struct Parameters {
     #[arg(long = "sjdbGTFfile")]
     pub sjdb_gtf_file: Option<PathBuf>,
 
+    /// TSV file(s) of `chr start end [strand]` junctions (1-based intron first/last base) to
+    /// insert into the sjdb, unioned with any `--sjdbGTFfile` junctions
+    #[arg(long = "sjdbFileChrStartEnd", num_args = 1..)]
+    pub sjdb_file_chr_start_end: Vec<PathBuf>,
+
     /// Prefix to add to chromosome names from GTF file (e.g. "chr" when GTF uses bare numbers)
     #[arg(long = "sjdbGTFchrPrefix", default_value = "")]
     pub sjdb_gtf_chr_prefix: String,
