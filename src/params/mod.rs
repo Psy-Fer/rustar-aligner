@@ -729,6 +729,14 @@ pub struct Parameters {
     #[arg(long = "alignMatesGapMax", default_value_t = 0)]
     pub align_mates_gap_max: u32,
 
+    /// Min overlap (bases) between mates required to trigger merge-and-realign; 0 = off
+    #[arg(long = "peOverlapNbasesMin", default_value_t = 0)]
+    pub pe_overlap_nbases_min: u64,
+
+    /// Max proportion of mismatches allowed in the mate-overlap region
+    #[arg(long = "peOverlapMMp", default_value_t = 0.01)]
+    pub pe_overlap_mmp: f64,
+
     /// Min mapped length of spliced mates (absolute, default 0 = off)
     #[arg(long = "alignSplicedMateMapLmin", default_value_t = 0)]
     pub align_spliced_mate_map_lmin: u32,

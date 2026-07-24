@@ -967,6 +967,73 @@ pub fn align_paired_read(
         }
     }
 
+    // --peOverlapNbasesMin: if the mates overlap in genome space, merge them into one
+    // single-end read, align that merged read through the same SE pipeline (`align_read`,
+    // this module), and convert each resulting SE transcript back into a two-mate pair,
+    // rescoring from scratch in the PE frame (`crate::align::pe_overlap`). STAR's semantics
+    // (mirrored here, per `star_pe_overlap.rs` in the sister project STAR-rs) are an
+    // unconditional overwrite: if the merge succeeds and at least one transcript converts,
+    // the separate-mate `joint_pairs` computed above is replaced outright — no additional
+    // score comparison, and the multimap-range filter below is not skipped, it just runs once
+    // on the replaced set instead of twice.
+    if params.pe_overlap_nbases_min > 0 {
+        let m1_slice = &combined_read[..len1];
+        let m2rc_slice = &combined_read[len1 + 1..];
+        if let Some(merge) = crate::align::pe_overlap::pe_merge_mates(
+            m1_slice,
+            m2rc_slice,
+            params.pe_overlap_nbases_min,
+            params.pe_overlap_mmp,
+        ) {
+            let (merged_transcripts, _merged_chim, _n_mapq, _unmapped) =
+                align_read(&merge.merged, read_name, index, params)?;
+            let mut converted: Vec<PairedAlignment> = Vec::new();
+            for t in &merged_transcripts {
+                let Some((m1, m2)) = crate::align::pe_overlap::convert_merged_transcript_to_pe(
+                    t,
+                    &merge,
+                    mate1_seq,
+                    mate2_seq,
+                    &index.genome,
+                    &scorer,
+                ) else {
+                    continue;
+                };
+                let m1_span = m1.genome_end - m1.genome_start;
+                let m2_span = m2.genome_end - m2.genome_start;
+                let combined_span =
+                    m1.genome_end.max(m2.genome_end) - m1.genome_start.min(m2.genome_start);
+                let combined_wt_score = (m1.score - scorer.genomic_length_penalty(m1_span))
+                    + (m2.score - scorer.genomic_length_penalty(m2_span))
+                    + scorer.genomic_length_penalty(combined_span);
+                let combined_n_match: u32 = m1
+                    .exons
+                    .iter()
+                    .map(|e| (e.read_end - e.read_start) as u32)
+                    .sum::<u32>()
+                    + m2.exons
+                        .iter()
+                        .map(|e| (e.read_end - e.read_start) as u32)
+                        .sum::<u32>();
+                let is_proper_pair = check_proper_pair(&m1, &m2, params);
+                let insert_size = calculate_insert_size(&m1, &m2);
+                converted.push(PairedAlignment {
+                    mate1_transcript: m1,
+                    mate2_transcript: m2,
+                    mate1_region: (0, len1),
+                    mate2_region: (0, len2),
+                    is_proper_pair,
+                    insert_size,
+                    combined_wt_score,
+                    combined_n_match,
+                });
+            }
+            if !converted.is_empty() {
+                joint_pairs = converted;
+            }
+        }
+    }
+
     // --- Decision tree: dedup, score-filter, quality-filter, then half-mapped fallback ---
 
     // Step 1: position dedup — remove exact (chr, mate1_pos, mate2_pos, strand, CIGAR) duplicates.
@@ -1315,7 +1382,7 @@ fn try_pair_transcripts(
 }
 
 /// Check if paired alignment is a proper pair
-fn check_proper_pair(
+pub(crate) fn check_proper_pair(
     mate1_trans: &Transcript,
     mate2_trans: &Transcript,
     params: &Parameters,

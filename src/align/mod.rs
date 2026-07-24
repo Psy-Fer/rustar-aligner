@@ -1,3 +1,4 @@
+pub mod pe_overlap;
 pub mod read_align;
 pub mod score;
 pub mod seed;
