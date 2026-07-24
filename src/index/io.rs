@@ -42,7 +42,34 @@ impl GenomeIndex {
             sa_index.data.len()
         );
 
-        // Load GTF annotations if provided
+        // Load prepared junctions from the index (sjdbInfo.txt) if present.
+        // STAR appends a Gsj flanking-sequence buffer to the genome at build
+        // time; align-time code needs the parsed junctions to (a) decode SA hits
+        // that land inside that buffer back to real (donor, acceptor) positions,
+        // and (b) recognise annotated junctions when aligning against a
+        // pre-built annotated index.
+        let sjdb_info_path = genome_dir.join("sjdbInfo.txt");
+        let (prepared_junctions, sjdb_overhang) = if sjdb_info_path.exists() {
+            let tab = sjdb_insert::read_sjdb_info_tab(&sjdb_info_path, &genome)?;
+            log::info!(
+                "Loaded sjdbInfo.txt: {} junctions, sjdbOverhang={}",
+                tab.junctions.len(),
+                tab.sjdb_overhang,
+            );
+            (tab.junctions, tab.sjdb_overhang)
+        } else {
+            (Vec::new(), 0)
+        };
+
+        // Build the annotated-junction database consulted at stitch time.
+        //   - If a GTF is supplied at align time, parse it (STAR's on-the-fly path).
+        //   - Otherwise fall back to the junctions stored in the index
+        //     (sjdbInfo.txt). Without this fallback, the standard workflow —
+        //     build the index once with `--sjdbGTFfile`, then align with only
+        //     `--genomeDir` — would treat every junction as novel (the runtime
+        //     db would be empty), losing all `sjdbScore` bonuses and annotated
+        //     junction recognition. Keyed on the stored (post-sjdbPrepare) donor/
+        //     acceptor coordinates, matching what the stitch scan produces.
         let junction_db = if let Some(ref gtf_path) = params.sjdb_gtf_file {
             SpliceJunctionDb::from_gtf_configured(
                 gtf_path,
@@ -51,6 +78,16 @@ impl GenomeIndex {
                 &params.sjdb_gtf_chr_prefix,
                 &params.sjdb_gtf_tag_exon_parent_transcript,
             )?
+        } else if !prepared_junctions.is_empty() {
+            let raw: Vec<(usize, u64, u64, u8)> = prepared_junctions
+                .iter()
+                .map(|j| (j.chr_idx, j.stored_start(), j.stored_end(), j.strand))
+                .collect();
+            log::info!(
+                "No GTF at align time; loaded {} annotated junctions from index sjdbInfo.txt",
+                raw.len()
+            );
+            SpliceJunctionDb::from_raw_junctions(&raw)
         } else {
             log::info!("No GTF file provided, all junctions will be novel");
             SpliceJunctionDb::empty()
@@ -99,24 +136,6 @@ impl GenomeIndex {
                 tr.gene_ids.len()
             );
         }
-
-        // Reload prepared junctions + sjdbOverhang from sjdbInfo.txt when
-        // present. STAR appends a Gsj flanking-sequence buffer to the
-        // genome at build time; align-time code needs the parsed junctions
-        // to decode SA hits that land inside that buffer back to real
-        // `(donor, acceptor)` genome positions.
-        let sjdb_info_path = genome_dir.join("sjdbInfo.txt");
-        let (prepared_junctions, sjdb_overhang) = if sjdb_info_path.exists() {
-            let tab = sjdb_insert::read_sjdb_info_tab(&sjdb_info_path, &genome)?;
-            log::info!(
-                "Loaded sjdbInfo.txt: {} junctions, sjdbOverhang={}",
-                tab.junctions.len(),
-                tab.sjdb_overhang,
-            );
-            (tab.junctions, tab.sjdb_overhang)
-        } else {
-            (Vec::new(), 0)
-        };
 
         Ok(GenomeIndex {
             genome,
