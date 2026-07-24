@@ -125,6 +125,47 @@ impl std::str::FromStr for IntronStrandFilter {
 }
 
 // ---------------------------------------------------------------------------
+// Multimapper output order / primary selection
+// ---------------------------------------------------------------------------
+
+/// STAR's `--outMultimapperOrder` — the order in which multi-mapping alignments
+/// are reported and how the primary is chosen among equal-scoring loci.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MultimapperOrder {
+    /// STAR default. Alignments are reported in a deterministic order and the
+    /// primary is `trBest` (max score → smaller genomic length → earliest
+    /// discovered). No RNG is used for primary selection.
+    #[default]
+    Old24,
+    /// Multimappers are shuffled with a per-read RNG and a best-scoring
+    /// alignment is marked primary. Deterministic per read (thread-count
+    /// invariant), unlike STAR's per-thread RNG.
+    Random,
+}
+
+impl std::str::FromStr for MultimapperOrder {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Old_2.4" => Ok(Self::Old24),
+            "Random" => Ok(Self::Random),
+            _ => Err(format!(
+                "unknown outMultimapperOrder value: '{s}'; expected 'Old_2.4' or 'Random'"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for MultimapperOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Old24 => write!(f, "Old_2.4"),
+            Self::Random => write!(f, "Random"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Standard output streaming
 // ---------------------------------------------------------------------------
 
@@ -390,6 +431,10 @@ pub struct Parameters {
     /// Min matched bases normalized to read length
     #[arg(long = "outFilterMatchNminOverLread", default_value_t = 0.66)]
     pub out_filter_match_nmin_over_lread: f64,
+
+    /// Order of multi-mapping alignments / primary selection
+    #[arg(long = "outMultimapperOrder", default_value = "Old_2.4")]
+    pub out_multimapper_order: MultimapperOrder,
 
     /// Filter alignments based on junction motifs
     #[arg(long = "outFilterIntronMotifs", default_value = "None")]

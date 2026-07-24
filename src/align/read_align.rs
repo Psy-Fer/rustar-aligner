@@ -5,14 +5,12 @@ use crate::align::stitch::{
     PE_SPACER_BASE, cluster_seeds, finalize_transcript, split_combined_wt, stitch_seeds_core,
     stitch_seeds_with_jdb_debug,
 };
-use crate::align::transcript::{Exon, KindExt as _, Transcript};
+use crate::align::transcript::{Exon, Transcript};
 use crate::error::Error;
 use crate::index::GenomeIndex;
-use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
+use crate::params::{IntronMotifFilter, IntronStrandFilter, MultimapperOrder, Parameters};
 use crate::stats::UnmappedReason;
-use noodles::sam::alignment::record::cigar;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
-use std::cmp::Ordering;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Derive a deterministic per-read RNG seed from `run_rng_seed` + the read name.
@@ -350,22 +348,24 @@ pub fn align_read(
     // Doing quality filters first is wrong: it can remove the high-scoring primary,
     // leaving a lower-scoring secondary that then passes as the "best" alignment.
 
-    // Deduplicate transcripts with identical genomic coordinates AND CIGAR.
-    transcripts.sort_by(|a, b| {
-        (a.chr_idx, a.genome_start, a.genome_end, a.is_reverse)
-            .cmp(&(b.chr_idx, b.genome_start, b.genome_end, b.is_reverse))
-            .then_with(|| cmp_cigar(&a.cigar, &b.cigar))
-            .then_with(|| b.score.cmp(&a.score))
-    });
-    transcripts.dedup_by(|a, b| {
-        a.chr_idx == b.chr_idx
-            && a.genome_start == b.genome_start
-            && a.genome_end == b.genome_end
-            && a.is_reverse == b.is_reverse
-            && a.cigar == b.cigar
-    });
+    // Deduplicate transcripts with identical genomic coordinates AND CIGAR,
+    // PRESERVING discovery (window) order. STAR's primary tie-break falls back
+    // to the earliest-discovered alignment, so we must not reorder here (the
+    // old code sorted by coordinate, destroying that order).
+    {
+        let mut seen = std::collections::HashSet::new();
+        transcripts.retain(|t| {
+            seen.insert((
+                t.chr_idx,
+                t.genome_start,
+                t.genome_end,
+                t.is_reverse,
+                t.cigar_string(),
+            ))
+        });
+    }
 
-    // Sort by score descending (deterministic tie-breaking).
+    // Deterministic primary tie-break (score, then a fixed positional order).
     transcripts.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -375,12 +375,24 @@ pub fn align_read(
             .then_with(|| a.is_reverse.cmp(&b.is_reverse))
     });
 
-    // Randomize primary among best-scoring ties (ReadAlign_multMapSelect.cpp:71-79).
-    shuffle_tied_prefix(
-        &mut transcripts,
-        |t| t.score,
-        per_read_seed(params.run_rng_seed, read_name),
-    );
+    // Primary selection — STAR's multMapSelect (ReadAlign_multMapSelect.cpp).
+    //
+    // STAR's DEFAULT (`--outMultimapperOrder Old_2.4`) does NOT consult the RNG
+    // for primary selection; it marks the deterministic best alignment primary.
+    // Only `--outMultimapperOrder Random` shuffles. Previously rustar-aligner
+    // shuffled unconditionally, which randomised the primary among equal-score
+    // loci and diverged from STAR's deterministic choice. Gate the shuffle on
+    // the Random mode so the default is deterministic and STAR-faithful.
+    //
+    // Under Random, we shuffle the tied top-score prefix with a per-read seed
+    // (deterministic per read → thread-count invariant).
+    if params.out_multimapper_order == MultimapperOrder::Random {
+        shuffle_tied_prefix(
+            &mut transcripts,
+            |t| t.score,
+            per_read_seed(params.run_rng_seed, read_name),
+        );
+    }
 
     // Score-range filter: keep only alignments within outFilterMultimapScoreRange of the best.
     // (STAR's multMapSelect step — must run before quality filters.)
@@ -961,38 +973,24 @@ pub fn align_paired_read(
     // Run dedup BEFORE score-range filter so the backup pool is already deduplicated.
     // (STAR's ordering is multMapSelect → dedup, but dedup before multMapSelect is equivalent
     // since removing exact duplicates doesn't change the best score.)
-    joint_pairs.sort_by(|a, b| {
-        let pos_cmp = (
-            a.mate1_transcript.chr_idx,
-            a.mate1_transcript.genome_start,
-            a.mate1_transcript.is_reverse,
-            a.mate2_transcript.genome_start,
-            a.mate2_transcript.is_reverse,
-        )
-            .cmp(&(
-                b.mate1_transcript.chr_idx,
-                b.mate1_transcript.genome_start,
-                b.mate1_transcript.is_reverse,
-                b.mate2_transcript.genome_start,
-                b.mate2_transcript.is_reverse,
-            ));
-        if pos_cmp != std::cmp::Ordering::Equal {
-            return pos_cmp;
-        }
-        b.combined_wt_score
-            .cmp(&a.combined_wt_score)
-            .then_with(|| cmp_cigar(&a.mate1_transcript.cigar, &b.mate1_transcript.cigar))
-            .then_with(|| cmp_cigar(&a.mate2_transcript.cigar, &b.mate2_transcript.cigar))
-    });
-    joint_pairs.dedup_by(|a, b| {
-        a.mate1_transcript.chr_idx == b.mate1_transcript.chr_idx
-            && a.mate1_transcript.genome_start == b.mate1_transcript.genome_start
-            && a.mate1_transcript.is_reverse == b.mate1_transcript.is_reverse
-            && a.mate1_transcript.cigar == b.mate1_transcript.cigar
-            && a.mate2_transcript.genome_start == b.mate2_transcript.genome_start
-            && a.mate2_transcript.is_reverse == b.mate2_transcript.is_reverse
-            && a.mate2_transcript.cigar == b.mate2_transcript.cigar
-    });
+    // Order-preserving exact dedup (keep first in discovery order). We must not
+    // sort by position here: STAR's primary tie-break falls back to the
+    // earliest-discovered pair, so discovery order has to survive to the
+    // primary-selection sort below.
+    {
+        let mut seen = std::collections::HashSet::new();
+        joint_pairs.retain(|p| {
+            seen.insert((
+                p.mate1_transcript.chr_idx,
+                p.mate1_transcript.genome_start,
+                p.mate1_transcript.is_reverse,
+                p.mate1_transcript.cigar_string(),
+                p.mate2_transcript.genome_start,
+                p.mate2_transcript.is_reverse,
+                p.mate2_transcript.cigar_string(),
+            ))
+        });
+    }
 
     // Post-finalization mate2-exon-subset dedup.
     {
@@ -1082,28 +1080,35 @@ pub fn align_paired_read(
         ));
     }
 
+    // Deterministic primary tie-break (combined score, then a fixed positional
+    // order on mate1).
     joint_pairs.sort_by(|a, b| {
-        b.combined_wt_score
-            .cmp(&a.combined_wt_score)
-            .then_with(|| a.mate1_transcript.chr_idx.cmp(&b.mate1_transcript.chr_idx))
-            .then_with(|| {
-                a.mate1_transcript
-                    .genome_start
-                    .cmp(&b.mate1_transcript.genome_start)
-            })
-            .then_with(|| {
-                a.mate1_transcript
-                    .is_reverse
-                    .cmp(&b.mate1_transcript.is_reverse)
-            })
+        b.combined_wt_score.cmp(&a.combined_wt_score).then_with(|| {
+            (
+                a.mate1_transcript.chr_idx,
+                a.mate1_transcript.genome_start,
+                a.mate1_transcript.is_reverse,
+            )
+                .cmp(&(
+                    b.mate1_transcript.chr_idx,
+                    b.mate1_transcript.genome_start,
+                    b.mate1_transcript.is_reverse,
+                ))
+        })
     });
 
-    // Randomize primary among best-scoring pairs (STAR's funPrimaryAlignMark).
-    shuffle_tied_prefix(
-        &mut joint_pairs,
-        |pa| pa.combined_wt_score,
-        per_read_seed(params.run_rng_seed, read_name),
-    );
+    // Primary selection — STAR's multMapSelect. STAR's default does not use the
+    // RNG for the primary; only `--outMultimapperOrder Random` shuffles. Gate
+    // the (previously unconditional) shuffle so the default is deterministic
+    // and STAR-faithful; under Random, shuffle the tied top-score prefix with a
+    // per-read seed (deterministic per read → thread-count invariant).
+    if params.out_multimapper_order == MultimapperOrder::Random {
+        shuffle_tied_prefix(
+            &mut joint_pairs,
+            |pa| pa.combined_wt_score,
+            per_read_seed(params.run_rng_seed, read_name),
+        );
+    }
 
     // Step 4: quality filter (mappedFilter).
     filter_paired_transcripts(&mut joint_pairs, params);
@@ -1225,18 +1230,6 @@ pub fn align_paired_read(
         }
         (None, None) => Ok((Vec::new(), pe_chimeric, 0, Some(UnmappedReason::TooShort))),
     }
-}
-
-/// Comparator for deduplicating structs containing CIGAR ops via sort→dedup
-fn cmp_cigar(a: &[cigar::Op], b: &[cigar::Op]) -> Ordering {
-    a.len().cmp(&b.len()).then_with(|| {
-        (a.iter().zip(b.iter()))
-            .find_map(|(a, b)| {
-                let ord = (a.char(), a.len()).cmp(&(b.char(), b.len()));
-                (ord != Ordering::Equal).then_some(ord)
-            })
-            .unwrap_or(Ordering::Equal)
-    })
 }
 
 /// Attempt to pair two per-mate transcripts into a PairedAlignment.
