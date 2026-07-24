@@ -136,6 +136,11 @@ impl SamWriter {
         let rg_id_owned = params.primary_rg_id()?;
         let rg_id = rg_id_owned.as_deref();
 
+        let best_score = transcripts
+            .iter()
+            .map(|t| t.score)
+            .max()
+            .unwrap_or(i32::MIN);
         for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
             let mut record = transcript_to_record(
                 transcript,
@@ -150,6 +155,7 @@ impl SamWriter {
             )?;
             maybe_insert_rg_tag(&mut record, rg_id);
             apply_sam_flag_or_and(&mut record, params);
+            apply_primary_flag(&mut record, transcript.score, best_score, params);
 
             self.writer.write_alignment_record(&self.header, &record)?;
         }
@@ -262,6 +268,11 @@ impl SamWriter {
         let rg_id = rg_id_owned.as_deref();
 
         let mut records = Vec::with_capacity(max_output);
+        let best_score = transcripts
+            .iter()
+            .map(|t| t.score)
+            .max()
+            .unwrap_or(i32::MIN);
         for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
             let mut record = transcript_to_record(
                 transcript,
@@ -276,6 +287,7 @@ impl SamWriter {
             )?;
             maybe_insert_rg_tag(&mut record, rg_id);
             apply_sam_flag_or_and(&mut record, params);
+            apply_primary_flag(&mut record, transcript.score, best_score, params);
             records.push(record);
         }
 
@@ -333,6 +345,11 @@ impl SamWriter {
         let rg_id = rg_id_owned.as_deref();
 
         let mut records = Vec::with_capacity(max_output * 2);
+        let best_score = paired_alignments
+            .iter()
+            .map(|p| p.combined_wt_score)
+            .max()
+            .unwrap_or(i32::MIN);
 
         for (pair_idx, paired_aln) in paired_alignments.iter().take(max_output).enumerate() {
             let hit_index = pair_idx + 1; // 1-based
@@ -359,6 +376,7 @@ impl SamWriter {
             )?;
             maybe_insert_rg_tag(&mut rec1, rg_id);
             apply_sam_flag_or_and(&mut rec1, params);
+            apply_primary_flag(&mut rec1, combined_score, best_score, params);
             records.push(rec1);
 
             // Create record for mate2 (this=mate2, mate=mate1)
@@ -380,6 +398,7 @@ impl SamWriter {
             )?;
             maybe_insert_rg_tag(&mut rec2, rg_id);
             apply_sam_flag_or_and(&mut rec2, params);
+            apply_primary_flag(&mut rec2, combined_score, best_score, params);
             records.push(rec2);
         }
 
@@ -945,6 +964,19 @@ fn apply_sam_flag_or_and(record: &mut RecordBuf, params: &Parameters) {
     let and_bits = params.out_sam_flag_and.min(u16::MAX as u32) as u16;
     let bits = u16::from(record.flags());
     *record.flags_mut() = sam::alignment::record::Flags::from((bits & and_bits) | or_bits);
+}
+
+/// `--outSAMprimaryFlag AllBestScore`: clear the SECONDARY bit on every alignment tied for the
+/// best score, instead of only the single (already-sorted) best alignment (`OneBestScore`,
+/// the default, which the caller's existing hit-index-based SECONDARY assignment already gives).
+fn apply_primary_flag(record: &mut RecordBuf, score: i32, best_score: i32, params: &Parameters) {
+    if params.out_sam_primary_flag == crate::params::OutSamPrimaryFlag::AllBestScore
+        && score == best_score
+    {
+        let mut flags = record.flags();
+        flags.remove(sam::alignment::record::Flags::SECONDARY);
+        *record.flags_mut() = flags;
+    }
 }
 
 /// Convert FASTQ ASCII quality bytes (Phred+33) to raw Phred values (0-93) for
@@ -2575,6 +2607,62 @@ mod tests {
         // QC_FAIL (0x200) was OR-ed in.
         assert!(!records[0].flags().is_reverse_complemented());
         assert!(records[0].flags().is_qc_fail());
+    }
+
+    #[test]
+    fn test_out_sam_primary_flag_all_best_score() {
+        use cigar::op::{Kind, Op};
+        let genome = make_test_genome();
+        let params = Parameters::parse_from([
+            "rustar-aligner",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMprimaryFlag",
+            "AllBestScore",
+        ]);
+
+        let mk = |genome_start: u64, score: i32| Transcript {
+            chr_idx: 0,
+            genome_start,
+            genome_end: genome_start + 50,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![Op::new(Kind::Match, 50)],
+            score,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 4],
+        };
+        // Two alignments tied for the best score (100), one strictly worse (98).
+        let transcripts = vec![mk(0, 100), mk(2, 98), mk(4, 100)];
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let records = SamWriter::build_alignment_records(
+            "read1",
+            &read_seq,
+            &read_qual,
+            &transcripts,
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert!(!records[0].flags().is_secondary(), "best-score #1 primary");
+        assert!(
+            records[1].flags().is_secondary(),
+            "worse-score stays secondary"
+        );
+        assert!(
+            !records[2].flags().is_secondary(),
+            "best-score #2 also primary"
+        );
     }
 
     #[test]

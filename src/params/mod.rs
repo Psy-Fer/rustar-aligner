@@ -245,6 +245,33 @@ impl std::str::FromStr for OutFilterType {
 }
 
 // ---------------------------------------------------------------------------
+// SAM primary-flag assignment
+// ---------------------------------------------------------------------------
+
+/// Which alignment(s) get the SAM primary flag (`--outSAMprimaryFlag`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutSamPrimaryFlag {
+    /// Only the single best-tie-broken alignment is primary (STAR default).
+    #[default]
+    OneBestScore,
+    /// Every alignment tied for the best score is marked primary.
+    AllBestScore,
+}
+
+impl std::str::FromStr for OutSamPrimaryFlag {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "OneBestScore" => Ok(Self::OneBestScore),
+            "AllBestScore" => Ok(Self::AllBestScore),
+            _ => Err(format!(
+                "unknown outSAMprimaryFlag value: '{s}'; expected 'OneBestScore' or 'AllBestScore'"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Two-pass mode
 // ---------------------------------------------------------------------------
 
@@ -506,6 +533,10 @@ pub struct Parameters {
     /// Bits AND-ed into every mapped record's FLAG (`--outSAMflagAND`, default 65535 = keep all)
     #[arg(long = "outSAMflagAND", default_value_t = 65535)]
     pub out_sam_flag_and: u32,
+
+    /// Which alignment(s) get the SAM primary flag: `OneBestScore` (default) or `AllBestScore`
+    #[arg(long = "outSAMprimaryFlag", default_value = "OneBestScore")]
+    pub out_sam_primary_flag: OutSamPrimaryFlag,
 
     /// Output filter type: Normal or BySJout
     #[arg(long = "outFilterType", default_value = "Normal")]
