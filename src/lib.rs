@@ -1069,11 +1069,9 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
                         .count_se_read(&transcripts, n_for_mapq, &q.gene_ann);
                 }
 
-                // Record junction statistics
+                // Record junction statistics (deduped per read across all loci)
                 let is_unique = transcripts.len() == 1;
-                for transcript in &transcripts {
-                    record_transcript_junctions(transcript, &index, &sj_stats, is_unique);
-                }
+                record_read_junctions(&transcripts, &index, &sj_stats, is_unique);
 
                 // Extract junction keys from primary alignment for BySJout filtering
                 let primary_junction_keys =
@@ -1551,36 +1549,24 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
                     );
                 }
 
-                // Record junction statistics
+                // Record junction statistics (deduped per read across both mates
+                // and all loci — a junction crossed by both mates counts once).
                 let is_unique = both_mapped.len() == 1 || (has_half_mapped && results.len() == 1);
+                let mut read_trs: Vec<&crate::align::transcript::Transcript> = Vec::new();
                 for result in &results {
                     match result {
                         PairedAlignmentResult::BothMapped(pair) => {
-                            record_transcript_junctions(
-                                &pair.mate1_transcript,
-                                &index,
-                                &sj_stats,
-                                is_unique,
-                            );
-                            record_transcript_junctions(
-                                &pair.mate2_transcript,
-                                &index,
-                                &sj_stats,
-                                is_unique,
-                            );
+                            read_trs.push(&pair.mate1_transcript);
+                            read_trs.push(&pair.mate2_transcript);
                         }
                         PairedAlignmentResult::HalfMapped {
                             mapped_transcript, ..
                         } => {
-                            record_transcript_junctions(
-                                mapped_transcript,
-                                &index,
-                                &sj_stats,
-                                is_unique,
-                            );
+                            read_trs.push(mapped_transcript);
                         }
                     }
                 }
+                record_read_junctions(read_trs, &index, &sj_stats, is_unique);
 
                 // Extract junction keys from primary alignment for BySJout
                 let primary_junction_keys = if by_sjout && !results.is_empty() {
@@ -1869,14 +1855,69 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
 }
 
 /// Record junctions from a transcript into SJ statistics
-fn record_transcript_junctions(
-    transcript: &crate::align::transcript::Transcript,
+/// One splice junction extracted from a transcript's CIGAR (before per-read
+/// deduplication / recording).
+struct ReadJunction {
+    chr_idx: usize,
+    intron_start: u64,
+    intron_end: u64,
+    strand: u8,
+    motif: crate::align::score::SpliceMotif,
+    overhang: u32,
+    annotated: bool,
+}
+
+/// Record a read's splice junctions into `sj_stats`, **deduplicated per read**:
+/// a junction crossed by several of the read's alignments/mates counts ONCE,
+/// taking the max overhang across occurrences (STAR `outputTranscriptSJ`;
+/// confirmed against the byte-faithful STAR-rs `star_sj.rs::record_read`).
+/// `is_unique` reflects the read's overall mapping multiplicity (n_loci == 1),
+/// not per-locus. Recording per-locus/per-mate instead double-counts junctions
+/// crossed by both mates of a pair, inflating the SJ.out.tab multi counts.
+fn record_read_junctions<'a>(
+    transcripts: impl IntoIterator<Item = &'a crate::align::transcript::Transcript>,
     index: &crate::index::GenomeIndex,
     sj_stats: &crate::junction::SpliceJunctionStats,
     is_unique: bool,
 ) {
+    use std::collections::HashMap;
+    let mut per_read: HashMap<(usize, u64, u64), ReadJunction> = HashMap::new();
+    for t in transcripts {
+        for j in extract_transcript_junctions(t, index) {
+            per_read
+                .entry((j.chr_idx, j.intron_start, j.intron_end))
+                .and_modify(|e| {
+                    e.overhang = e.overhang.max(j.overhang);
+                    e.annotated |= j.annotated;
+                })
+                .or_insert(j);
+        }
+    }
+    for j in per_read.values() {
+        sj_stats.record_junction(
+            j.chr_idx,
+            j.intron_start,
+            j.intron_end,
+            j.strand,
+            j.motif,
+            is_unique,
+            j.overhang,
+            j.annotated,
+        );
+    }
+}
+
+/// Extract all splice junctions (`N` / Skip ops) from one transcript's CIGAR,
+/// with per-junction overhang, motif, strand and annotation — without recording
+/// them (recording is done per-read by `record_read_junctions`).
+fn extract_transcript_junctions(
+    transcript: &crate::align::transcript::Transcript,
+    index: &crate::index::GenomeIndex,
+) -> Vec<ReadJunction> {
     use crate::align::score::AlignmentScorer;
     use cigar::op::Kind;
+
+    let mut out: Vec<ReadJunction> = Vec::new();
 
     // First pass: compute exon segment lengths (query-consuming bases between N operations)
     // An "exon segment" is the query bases on each side of a splice junction.
@@ -1935,17 +1976,15 @@ fn record_transcript_junctions(
                     strand,
                 );
 
-                // Record junction
-                sj_stats.record_junction(
-                    transcript.chr_idx,
+                out.push(ReadJunction {
+                    chr_idx: transcript.chr_idx,
                     intron_start,
                     intron_end,
                     strand,
                     motif,
-                    is_unique,
                     overhang,
                     annotated,
-                );
+                });
 
                 // Advance genome position past the intron
                 genome_pos += intron_len as u64;
@@ -1957,4 +1996,6 @@ fn record_transcript_junctions(
             Kind::Insertion | Kind::SoftClip | Kind::HardClip | Kind::Pad => {}
         }
     }
+
+    out
 }
