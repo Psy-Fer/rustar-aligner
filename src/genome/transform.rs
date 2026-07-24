@@ -2,12 +2,13 @@
 //! the genome before the suffix array is built, so reads carrying the alternate allele align with
 //! fewer mismatches.
 //!
-//! Ported from STAR-rs `crates/star-index/src/transform.rs`. Only **Haploid** (one allele per site,
-//! including indels that shift coordinates and split the `transformGenomeBlocks.tsv` block map) is
-//! implemented; **Diploid** (the genome duplicated into `_h1`/`_h2` haplotypes) is a follow-up. With
-//! the only supported `--genomeTransformOutput` (`None`, the default) this is a pure `genomeGenerate`
-//! transform: the aligner reports transformed-genome coordinates directly, so no align-time
-//! back-transform is implemented either (that's a separate follow-up, gated in `Parameters::validate`).
+//! Ported from STAR-rs `crates/star-index/src/transform.rs`. Both **Haploid** (one allele per site)
+//! and **Diploid** (genotype-aware, duplicating the genome into `_h1`/`_h2` haplotypes) are
+//! implemented, including indels that shift coordinates and split the `transformGenomeBlocks.tsv`
+//! block map. With the only supported `--genomeTransformOutput` (`None`, the default) this is a pure
+//! `genomeGenerate` transform: the aligner reports transformed-genome coordinates directly, so no
+//! align-time back-transform is implemented (that's a separate follow-up, gated in
+//! `Parameters::validate`) — for Diploid that also means no `ha:i:` haplotype tag yet.
 //!
 //! Unlike STAR-rs, which transforms an already-laid-out, bin-padded genome buffer, this operates on
 //! rustar-aligner's `Vec<Chromosome>` (name + unpadded base-code sequence) directly, before
@@ -83,6 +84,72 @@ pub fn parse_vcf_haploid(text: &str, chr_name: &[String]) -> BTreeMap<usize, Vec
 
     for variants in per_chr.values_mut() {
         *variants = filter_sort_variants(std::mem::take(variants));
+    }
+    per_chr
+}
+
+/// Parse a VCF for the Diploid transform (`Genome_transformGenome.cpp`'s diploid path): genotype-aware,
+/// producing one variant list per haplotype (`[hap0, hap1]`). For each record and each haplotype `ih`,
+/// the genotype digit is read from the sample column (field index 9) at character offset `ih*2` (e.g.
+/// `0|1` → hap0 digit at offset 0, hap1 digit at offset 2); a genotype of `0` means no variant on that
+/// haplotype, otherwise it 1-indexes into the comma-separated ALT list (`altV[gt-1]`). Records without a
+/// sample column, or with a non-digit at the expected offset, contribute no variant for that haplotype.
+pub fn parse_vcf_diploid(text: &str, chr_name: &[String]) -> [BTreeMap<usize, Vec<Variant>>; 2] {
+    let index: BTreeMap<&str, usize> = chr_name
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    let mut per_chr: [BTreeMap<usize, Vec<Variant>>; 2] = [BTreeMap::new(), BTreeMap::new()];
+    for line in text.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 10 {
+            continue;
+        }
+        let Some(&ci) = index.get(f[0]) else {
+            continue;
+        };
+        let Ok(pos1): Result<u64, _> = f[1].parse() else {
+            continue;
+        };
+        if pos1 == 0 {
+            continue;
+        }
+        let ref_allele = f[3].as_bytes();
+        let alt_alleles: Vec<&[u8]> = f[4].split(',').map(str::as_bytes).collect();
+        let gt_field = f[9].split(':').next().unwrap_or(f[9]).as_bytes();
+
+        for (ih, per_hap) in per_chr.iter_mut().enumerate() {
+            let offset = ih * 2;
+            let Some(&c) = gt_field.get(offset) else {
+                continue;
+            };
+            if !c.is_ascii_digit() {
+                continue;
+            }
+            let gt = (c - b'0') as usize;
+            if gt == 0 {
+                continue;
+            }
+            let Some(&alt) = alt_alleles.get(gt - 1) else {
+                continue;
+            };
+            per_hap.entry(ci).or_default().push(Variant {
+                pos: pos1 - 1,
+                ref_len: ref_allele.len(),
+                alt: alt.to_vec(),
+            });
+        }
+    }
+
+    for per_hap in &mut per_chr {
+        for variants in per_hap.values_mut() {
+            *variants = filter_sort_variants(std::mem::take(variants));
+        }
     }
     per_chr
 }
@@ -202,6 +269,54 @@ pub fn transform_chromosomes(
     }
 }
 
+/// Apply the Diploid VCF transform: run the Haploid single-genome substitution once per haplotype
+/// (`variants[0]`/`variants[1]`), rename chromosomes `<name>_h1`/`<name>_h2`, and concatenate hap0's
+/// transformed chromosomes then hap1's into one combined chromosome list. Block `orig_start` stays in
+/// the single shared original-genome coordinate space for both halves (both haplotypes substitute the
+/// same reference); block `new_start` is globalized per-half by [`transform_chromosomes`] and then
+/// hap1's is additionally shifted by `offset` — hap0's own padded genome length, computed the same
+/// deterministic way [`Genome::from_fasta`](super::Genome::from_fasta) will lay out the final combined
+/// genome, so hap1's blocks land exactly where hap1's chromosomes end up after concatenation.
+pub fn transform_genome_diploid(
+    chromosomes: &[Chromosome],
+    variants: &[BTreeMap<usize, Vec<Variant>>; 2],
+    chr_bin_nbits: u32,
+) -> TransformedGenome {
+    let hap0 = transform_chromosomes(chromosomes, &variants[0], chr_bin_nbits);
+    let hap1 = transform_chromosomes(chromosomes, &variants[1], chr_bin_nbits);
+
+    let hap0_lengths: Vec<u64> = hap0
+        .chromosomes
+        .iter()
+        .map(|c| c.sequence.len() as u64)
+        .collect();
+    let offset = *compute_chr_starts(&hap0_lengths, chr_bin_nbits)
+        .last()
+        .unwrap();
+
+    let mut new_chromosomes = Vec::with_capacity(hap0.chromosomes.len() + hap1.chromosomes.len());
+    for c in hap0.chromosomes {
+        new_chromosomes.push(Chromosome {
+            name: format!("{}_h1", c.name),
+            sequence: c.sequence,
+        });
+    }
+    for c in hap1.chromosomes {
+        new_chromosomes.push(Chromosome {
+            name: format!("{}_h2", c.name),
+            sequence: c.sequence,
+        });
+    }
+
+    let mut blocks = hap0.blocks;
+    blocks.extend(hap1.blocks.into_iter().map(|[o, l, n]| [o, l, n + offset]));
+
+    TransformedGenome {
+        chromosomes: new_chromosomes,
+        blocks,
+    }
+}
+
 /// Render `transformGenomeBlocks.tsv` (STAR's `transformBlocksWrite`): header `<nBlocks>\t-1`, then
 /// one `new_start\tlength\torig_start` line per block (reverting the stored
 /// `[orig_start, length, new_start]` order, for reverse conversion).
@@ -306,5 +421,57 @@ chr2\t3\t.\tC\tT\t.\t.\t.
     fn blocks_to_tsv_reverts_column_order() {
         let tsv = blocks_to_tsv(&[[0, 5, 0], [5, 2, 7]]);
         assert_eq!(tsv, "2\t-1\n0\t5\t0\n7\t2\t5\n");
+    }
+
+    #[test]
+    fn diploid_genotype_parsing() {
+        let chr = vec!["chr1".to_string()];
+        let vcf = "\
+##fileformat=VCFv4.2
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE
+chr1\t3\t.\tC\tA,T\t.\t.\t.\tGT\t0|1
+chr1\t6\t.\tG\tA\t.\t.\t.\tGT\t1/1
+";
+        let [h0, h1] = parse_vcf_diploid(vcf, &chr);
+        // Line 1 (0-based pos 2, het "0|1"): hap0 gt=0 -> no variant; hap1 gt=1 -> alt[0]="A".
+        // Line 2 (0-based pos 5, hom "1/1"): both haplotypes get alt[0]="A".
+        assert_eq!(h0[&0].len(), 1);
+        assert_eq!(h0[&0][0].pos, 5);
+        assert_eq!(h1[&0].len(), 2);
+        assert_eq!(h1[&0][0].pos, 2);
+        assert_eq!(h1[&0][0].alt, b"A");
+        assert_eq!(h1[&0][1].pos, 5);
+    }
+
+    #[test]
+    fn diploid_transform_concatenates_haplotypes_with_offset() {
+        let chromosomes = vec![Chromosome {
+            name: "chr1".to_string(),
+            sequence: vec![0, 0, 0, 0], // AAAA
+        }];
+        let mut h0 = BTreeMap::new();
+        h0.insert(
+            0usize,
+            vec![Variant {
+                pos: 1,
+                ref_len: 1,
+                alt: b"C".to_vec(),
+            }],
+        );
+        let h1: BTreeMap<usize, Vec<Variant>> = BTreeMap::new();
+        let variants = [h0, h1];
+
+        let t = transform_genome_diploid(&chromosomes, &variants, 18);
+        assert_eq!(t.chromosomes.len(), 2);
+        assert_eq!(t.chromosomes[0].name, "chr1_h1");
+        assert_eq!(t.chromosomes[1].name, "chr1_h2");
+        assert_eq!(t.chromosomes[0].sequence[1], 1); // C substituted on hap0
+        assert_eq!(t.chromosomes[1].sequence, vec![0, 0, 0, 0]); // hap1 identity
+
+        let offset = *compute_chr_starts(&[4], 18).last().unwrap();
+        assert_eq!(t.blocks.len(), 2); // one identity-length block per haplotype (SNV doesn't split)
+        assert_eq!(t.blocks[0][0], 0); // orig_start
+        assert_eq!(t.blocks[1][0], 0); // same shared orig_start, not offset
+        assert_eq!(t.blocks[1][2], offset); // new_start shifted by hap0's padded genome length
     }
 }

@@ -142,7 +142,7 @@ pub struct Genome {
     /// Length = n_chr_real + 1; the last entry is n_genome (total size).
     pub chr_start: Vec<u64>,
 
-    /// `--genomeTransformType Haploid` block map (`[orig_start, length, new_start]`,
+    /// `--genomeTransformType Haploid`/`Diploid` block map (`[orig_start, length, new_start]`,
     /// forward-genome coordinates), `None` unless a transform was applied. Written
     /// to `transformGenomeBlocks.tsv` by [`write_index_files`](Self::write_index_files).
     pub transform_blocks: Option<Vec<[u64; 3]>>,
@@ -195,6 +195,18 @@ impl Genome {
             let chr_name: Vec<String> = chromosomes.iter().map(|c| c.name.clone()).collect();
             let variants = transform::parse_vcf_haploid(&vcf_text, &chr_name);
             let transformed = transform::transform_chromosomes(&chromosomes, &variants, bin_nbits);
+            chromosomes = transformed.chromosomes;
+            Some(transformed.blocks)
+        } else if params.genome_transform_type.eq_ignore_ascii_case("Diploid") {
+            let vcf_path = params
+                .genome_transform_vcf
+                .as_ref()
+                .expect("validated: Diploid requires --genomeTransformVCF");
+            let vcf_text = std::fs::read_to_string(vcf_path).map_err(|e| Error::io(e, vcf_path))?;
+            let chr_name: Vec<String> = chromosomes.iter().map(|c| c.name.clone()).collect();
+            let variants = transform::parse_vcf_diploid(&vcf_text, &chr_name);
+            let transformed =
+                transform::transform_genome_diploid(&chromosomes, &variants, bin_nbits);
             chromosomes = transformed.chromosomes;
             Some(transformed.blocks)
         } else {

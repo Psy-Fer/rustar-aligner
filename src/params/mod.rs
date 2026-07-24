@@ -372,9 +372,10 @@ pub struct Parameters {
     #[arg(long = "genomeSAsparseD", default_value_t = 1)]
     pub genome_sa_sparse_d: u32,
 
-    /// Substitute VCF alleles into the genome at genomeGenerate (`None` or
-    /// `Haploid`). Requires `--genomeTransformVCF`; incompatible with
-    /// `--sjdbGTFfile`. `Diploid` is not implemented (see `Parameters::validate`)
+    /// Substitute VCF alleles into the genome at genomeGenerate (`None`,
+    /// `Haploid`, or `Diploid`). Requires `--genomeTransformVCF`; incompatible
+    /// with `--sjdbGTFfile`. `Diploid` is genotype-aware and duplicates the
+    /// genome into `_h1`/`_h2` haplotype chromosomes (see `Parameters::validate`)
     #[arg(long = "genomeTransformType", default_value = "None")]
     pub genome_transform_type: String,
 
@@ -1119,27 +1120,22 @@ impl Parameters {
             ));
         }
 
-        // --genomeTransformType: only Haploid is implemented (Diploid substitutes
-        // and duplicates the genome into two haplotypes; not yet ported). Requires
-        // a VCF, and is incompatible with a GTF (STAR itself doesn't combine
+        // --genomeTransformType: Haploid and Diploid are implemented. Both require
+        // a VCF, and are incompatible with a GTF (STAR itself doesn't combine
         // genomeTransform with sjdb annotation at genomeGenerate).
         if !params.genome_transform_type.eq_ignore_ascii_case("None") {
-            if params.genome_transform_type.eq_ignore_ascii_case("Diploid") {
+            if !params.genome_transform_type.eq_ignore_ascii_case("Haploid")
+                && !params.genome_transform_type.eq_ignore_ascii_case("Diploid")
+            {
                 return Err(command.error(
                     ErrorKind::InvalidValue,
-                    "--genomeTransformType Diploid is not implemented; use --genomeTransformType Haploid",
-                ));
-            }
-            if !params.genome_transform_type.eq_ignore_ascii_case("Haploid") {
-                return Err(command.error(
-                    ErrorKind::InvalidValue,
-                    "--genomeTransformType must be None or Haploid",
+                    "--genomeTransformType must be None, Haploid, or Diploid",
                 ));
             }
             if params.genome_transform_vcf.is_none() {
                 return Err(command.error(
                     ErrorKind::MissingRequiredArgument,
-                    "--genomeTransformType Haploid requires --genomeTransformVCF",
+                    "--genomeTransformType Haploid/Diploid requires --genomeTransformVCF",
                 ));
             }
             if params.sjdb_gtf_file.is_some() {
