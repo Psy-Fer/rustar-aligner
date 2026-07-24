@@ -9,7 +9,11 @@
 //! (`vW:i:1`), otherwise a failure code is reported. Reads overlapping no variant
 //! get no `vW` tag (code `-1`).
 //!
-//! This revision covers **single-end**; paired-end WASP is a follow-up.
+//! Covers **single-end** ([`annotate_records_se`]) and **paired-end**
+//! ([`annotate_records_pe`]). For a pair, variants overlapping mate1 and mate2
+//! are walked in mate1-then-mate2 order (STAR's combined `mate1 ++ rc(mate2)`
+//! transcript frame), a single `vW` code is computed by re-mapping the whole
+//! pair with each allele combination, and both mate records share `vW`/`vA`/`vG`.
 //!
 //! Everything works in rustar-aligner's base-code space (`A=0,C=1,G=2,T=3,N=4`),
 //! and variant/read overlap is computed by walking the transcript CIGAR in
@@ -24,7 +28,9 @@ use noodles::sam::alignment::record_buf::RecordBuf;
 use noodles::sam::alignment::record_buf::data::field::Value;
 use noodles::sam::alignment::record_buf::data::field::value::Array;
 
-use crate::align::read_align::align_read;
+use crate::align::read_align::{
+    PairedAlignment, PairedAlignmentResult, align_paired_read, align_read,
+};
 use crate::align::transcript::Transcript;
 use crate::error::Error;
 use crate::index::GenomeIndex;
@@ -359,6 +365,202 @@ pub fn annotate_records_se(
     Ok(())
 }
 
+/// STAR `Transcript::variationAdjust` for a paired-end alignment: the combined
+/// `vG`/`vA` tag values from variants overlapping mate1 then mate2 (STAR's
+/// `mate1 ++ rc(mate2)` combined-transcript order). Both mate records share this
+/// array. `chr_start1`/`chr_start2` are the mates' chromosome genome offsets;
+/// `m1_codes`/`m2_codes` are the forward mate reads (base codes).
+#[allow(clippy::too_many_arguments)]
+pub fn wasp_variants_pe(
+    chr_start1: u64,
+    chr_start2: u64,
+    snps: &[Snp],
+    m1_codes: &[u8],
+    m2_codes: &[u8],
+    tr1: &Transcript,
+    tr2: &Transcript,
+) -> (Vec<i32>, Vec<u8>) {
+    let mut vg = Vec::new();
+    let mut va = Vec::new();
+    for (chr_start, codes, tr) in [(chr_start1, m1_codes, tr1), (chr_start2, m2_codes, tr2)] {
+        let sam_codes = if tr.is_reverse {
+            rc_codes(codes)
+        } else {
+            codes.to_vec()
+        };
+        for (isnp, _rp, allele) in variation_overlap(snps, &sam_codes, tr) {
+            vg.push((snps[isnp].loci - chr_start) as i32);
+            va.push(allele);
+        }
+    }
+    (vg, va)
+}
+
+/// STAR `waspMap` (paired-end): the `vW` code for a pair, or `-1` for no `vW` tag
+/// (neither mate overlaps a variant). Codes match [`wasp_type`]: `1` passed, `2`
+/// pair multimaps, `3` a variant base is `N`, `4` a re-map is not both-mapped,
+/// `5` a re-map multimaps, `6` a re-map lands elsewhere, `7` too many variants.
+/// Each allele combination is applied per mate in its SAM frame, mapped back to
+/// forward mates, and re-mapped as a pair with the WASP-relaxed [`remap_params`].
+#[allow(clippy::too_many_arguments)]
+pub fn wasp_type_pe(
+    index: &GenomeIndex,
+    snps: &[Snp],
+    m1_codes: &[u8],
+    m2_codes: &[u8],
+    read_name: &str,
+    tr1: &Transcript,
+    tr2: &Transcript,
+    n_tr: usize,
+    remap_params: &Parameters,
+) -> Result<i32, Error> {
+    let sam1 = if tr1.is_reverse {
+        rc_codes(m1_codes)
+    } else {
+        m1_codes.to_vec()
+    };
+    let sam2 = if tr2.is_reverse {
+        rc_codes(m2_codes)
+    } else {
+        m2_codes.to_vec()
+    };
+    let vars1 = variation_overlap(snps, &sam1, tr1);
+    let vars2 = variation_overlap(snps, &sam2, tr2);
+    if vars1.is_empty() && vars2.is_empty() {
+        return Ok(-1);
+    }
+    if n_tr > 1 {
+        return Ok(2);
+    }
+    let n1 = vars1.len();
+    let n = n1 + vars2.len();
+    if n > 10 {
+        return Ok(7);
+    }
+    if vars1
+        .iter()
+        .chain(vars2.iter())
+        .any(|&(_, _, allele)| allele > 3)
+    {
+        return Ok(3);
+    }
+
+    // Combined actual alleles, mate1 then mate2 (matches STAR's combined read).
+    let actual: Vec<u8> = vars1
+        .iter()
+        .chain(vars2.iter())
+        .map(|&(_, _, a)| a)
+        .collect();
+    for mask in 0..(1u32 << n) {
+        let combo: Vec<u8> = (0..n)
+            .map(|i| if mask & (1 << i) != 0 { 2 } else { 1 })
+            .collect();
+        if combo == actual {
+            continue;
+        }
+        // Flip each variant's base to the combination's allele in each mate's SAM
+        // frame, then map back to the forward mate reads.
+        let mut mod1 = sam1.clone();
+        for (iv, &(isnp, read_pos, _)) in vars1.iter().enumerate() {
+            mod1[read_pos] = snps[isnp].nt[combo[iv] as usize];
+        }
+        let mut mod2 = sam2.clone();
+        for (iv, &(isnp, read_pos, _)) in vars2.iter().enumerate() {
+            mod2[read_pos] = snps[isnp].nt[combo[n1 + iv] as usize];
+        }
+        let remap1 = if tr1.is_reverse {
+            rc_codes(&mod1)
+        } else {
+            mod1
+        };
+        let remap2 = if tr2.is_reverse {
+            rc_codes(&mod2)
+        } else {
+            mod2
+        };
+
+        let (results, _chim, _n_for_mapq, _reason) =
+            align_paired_read(&remap1, &remap2, read_name, index, remap_params)?;
+        let both: Vec<&PairedAlignment> = results
+            .iter()
+            .filter_map(|r| match r {
+                PairedAlignmentResult::BothMapped(pa) => Some(pa.as_ref()),
+                PairedAlignmentResult::HalfMapped { .. } => None,
+            })
+            .collect();
+        if both.is_empty() {
+            return Ok(4); // re-map unmapped / half-mapped / too-many-loci
+        }
+        if both.len() > 1 {
+            return Ok(5);
+        }
+        let pa = both[0];
+        if !same_exons(&pa.mate1_transcript, tr1) || !same_exons(&pa.mate2_transcript, tr2) {
+            return Ok(6);
+        }
+    }
+    Ok(1)
+}
+
+/// Compute WASP tags for a paired-end read and stamp them onto its already-built
+/// SAM records. `records` is `[mate1, mate2, mate1, mate2, ...]` (two per pair, as
+/// [`crate::io::sam::SamWriter::build_paired_records`] emits); `paired[i]`
+/// corresponds to `records[2i]`/`records[2i+1]`. A uniquely-mapped pair is
+/// re-mapped (computing a single `vW` shared by both mate lines); a multi-mapped
+/// pair overlapping variants gets `vW:i:2`. Pairs overlapping no variant are left
+/// untagged.
+#[allow(clippy::too_many_arguments)]
+pub fn annotate_records_pe(
+    records: &mut [RecordBuf],
+    paired: &[PairedAlignment],
+    m1_codes: &[u8],
+    m2_codes: &[u8],
+    read_name: &str,
+    index: &GenomeIndex,
+    ctx: &WaspContext,
+    attrs: SamAttributes,
+) -> Result<(), Error> {
+    let snps = &ctx.snps;
+    if paired.len() == 1 {
+        let pa = &paired[0];
+        let (tr1, tr2) = (&pa.mate1_transcript, &pa.mate2_transcript);
+        let vw = wasp_type_pe(
+            index,
+            snps,
+            m1_codes,
+            m2_codes,
+            read_name,
+            tr1,
+            tr2,
+            1,
+            &ctx.remap_params,
+        )?;
+        if vw != -1 {
+            let cs1 = index.genome.chr_start[tr1.chr_idx];
+            let cs2 = index.genome.chr_start[tr2.chr_idx];
+            let (vg, va) = wasp_variants_pe(cs1, cs2, snps, m1_codes, m2_codes, tr1, tr2);
+            for rec in records.iter_mut().take(2) {
+                insert_wasp_tags(rec, vw, &vg, &va, attrs);
+            }
+        }
+    } else {
+        for (i, pa) in paired.iter().enumerate() {
+            let (tr1, tr2) = (&pa.mate1_transcript, &pa.mate2_transcript);
+            let cs1 = index.genome.chr_start[tr1.chr_idx];
+            let cs2 = index.genome.chr_start[tr2.chr_idx];
+            let (vg, va) = wasp_variants_pe(cs1, cs2, snps, m1_codes, m2_codes, tr1, tr2);
+            if !vg.is_empty() {
+                for k in 0..2 {
+                    if let Some(rec) = records.get_mut(2 * i + k) {
+                        insert_wasp_tags(rec, 2, &vg, &va, attrs);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +681,50 @@ mod tests {
         let tr = tr_fwd_50m(100);
         let (vg, va) = wasp_variants(0, &snps, &[0u8; 50], &tr);
         assert!(vg.is_empty() && va.is_empty());
+    }
+
+    #[test]
+    fn wasp_variants_pe_combines_mate1_then_mate2() {
+        // SNP over mate1 (genome 110) and mate2 (genome 310); both forward.
+        let snps = vec![
+            Snp {
+                loci: 110,
+                nt: [0, 0, 2],
+            },
+            Snp {
+                loci: 310,
+                nt: [0, 0, 2],
+            },
+        ];
+        let tr1 = tr_fwd_50m(100);
+        let tr2 = tr_fwd_50m(300);
+        let mut m1 = vec![0u8; 50];
+        m1[10] = 2; // allele 2 at mate1 SNP
+        let mut m2 = vec![0u8; 50];
+        m2[10] = 2; // allele 2 at mate2 SNP
+        let (vg, va) = wasp_variants_pe(0, 0, &snps, &m1, &m2, &tr1, &tr2);
+        // mate1 variant first, then mate2 (STAR's mate1 ++ rc(mate2) order).
+        assert_eq!(vg, vec![110, 310]);
+        assert_eq!(va, vec![2, 2]);
+    }
+
+    #[test]
+    fn wasp_variants_pe_reverse_mate2_frame() {
+        // mate2 aligns reverse: its SAM frame is rc(mate2 read).
+        let snps = vec![Snp {
+            loci: 310,
+            nt: [0, 0, 2],
+        }];
+        let tr1 = tr_fwd_50m(100);
+        let mut tr2 = tr_fwd_50m(300);
+        tr2.is_reverse = true;
+        let m1 = vec![0u8; 50]; // no mate1 overlap
+        // Build mate2 forward read whose rc has allele 2 at the SNP offset (10).
+        let mut sam2 = vec![0u8; 50];
+        sam2[10] = 2;
+        let m2 = rc_codes(&sam2);
+        let (vg, va) = wasp_variants_pe(0, 0, &snps, &m1, &m2, &tr1, &tr2);
+        assert_eq!(vg, vec![310]);
+        assert_eq!(va, vec![2]);
     }
 }
