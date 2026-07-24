@@ -487,6 +487,22 @@ pub struct Parameters {
     #[arg(long = "clipAdapterType", default_value = "Hamming")]
     pub clip_adapter_type: String,
 
+    /// 3' adapter sequence to clip (Hamming scan), `-` = none
+    #[arg(long = "clip3pAdapterSeq", default_value = "-")]
+    pub clip3p_adapter_seq: String,
+
+    /// Max mismatch proportion for the 3' adapter clip
+    #[arg(long = "clip3pAdapterMMp", default_value_t = 0.1)]
+    pub clip3p_adapter_mmp: f64,
+
+    /// Extra bases to clip from the 3' end after the adapter
+    #[arg(long = "clip3pAfterAdapterNbases", default_value_t = 0)]
+    pub clip3p_after_adapter_nbases: u32,
+
+    /// Extra bases to clip from the 5' end after `clip5pNbases`
+    #[arg(long = "clip5pAfterAdapterNbases", default_value_t = 0)]
+    pub clip5p_after_adapter_nbases: u32,
+
     // ── Output ──────────────────────────────────────────────────────────
     /// Output file name prefix (including path)
     #[arg(long = "outFileNamePrefix", default_value = "./")]

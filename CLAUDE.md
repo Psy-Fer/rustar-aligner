@@ -78,6 +78,10 @@ src/
     segment.rs     -- ChimericSegment and ChimericAlignment data structures
     score.rs       -- Junction type classification, repeat length calculation
     output.rs      -- Chimeric.out.junction writer (14-column format)
+  clip/
+    mod.rs         -- Adapter-aware clipping (--clip{5,3}pNbases + Hamming --clip3pAdapterSeq/*MMp/*AfterAdapterNbases)
+  wasp/
+    mod.rs         -- WASP allele-specific-mapping filter (--waspOutputMode SAMtag, --varVCFfile), SE + PE
 ```
 
 ## Development Philosophy — Match STAR Exactly
