@@ -149,6 +149,7 @@ impl SamWriter {
                 attrs,
             )?;
             maybe_insert_rg_tag(&mut record, rg_id);
+            apply_sam_flag_or_and(&mut record, params);
 
             self.writer.write_alignment_record(&self.header, &record)?;
         }
@@ -274,6 +275,7 @@ impl SamWriter {
                 attrs,
             )?;
             maybe_insert_rg_tag(&mut record, rg_id);
+            apply_sam_flag_or_and(&mut record, params);
             records.push(record);
         }
 
@@ -356,6 +358,7 @@ impl SamWriter {
                 attrs,
             )?;
             maybe_insert_rg_tag(&mut rec1, rg_id);
+            apply_sam_flag_or_and(&mut rec1, params);
             records.push(rec1);
 
             // Create record for mate2 (this=mate2, mate=mate1)
@@ -376,6 +379,7 @@ impl SamWriter {
                 attrs,
             )?;
             maybe_insert_rg_tag(&mut rec2, rg_id);
+            apply_sam_flag_or_and(&mut rec2, params);
             records.push(rec2);
         }
 
@@ -524,6 +528,7 @@ impl SamWriter {
             data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
         }
         maybe_insert_rg_tag(&mut mapped_rec, rg_id);
+        apply_sam_flag_or_and(&mut mapped_rec, params);
 
         // --- Build unmapped mate record ---
         let mut unmapped_rec = RecordBuf::default();
@@ -930,6 +935,16 @@ pub fn add_gene_tags(records: &mut [RecordBuf], gx: &str, gn: &str, attrs: SamAt
                 .insert(Tag::new(b'G', b'N'), Value::String(BString::from(gn)));
         }
     }
+}
+
+/// Apply `--outSAMflagOR` / `--outSAMflagAND` to a mapped record's FLAG:
+/// `(FLAG & flagAND) | flagOR`. Matches STAR/STAR-rs, which apply this only to
+/// mapped-mate records; unmapped and transcriptome-BAM records are untouched.
+fn apply_sam_flag_or_and(record: &mut RecordBuf, params: &Parameters) {
+    let or_bits = params.out_sam_flag_or as u16;
+    let and_bits = params.out_sam_flag_and.min(u16::MAX as u32) as u16;
+    let bits = u16::from(record.flags());
+    *record.flags_mut() = sam::alignment::record::Flags::from((bits & and_bits) | or_bits);
 }
 
 /// Convert FASTQ ASCII quality bytes (Phred+33) to raw Phred values (0-93) for
@@ -2508,6 +2523,58 @@ mod tests {
         // Record 2 (HI=3): IS secondary + reverse complemented
         assert!(records[2].flags().is_secondary());
         assert!(records[2].flags().is_reverse_complemented());
+    }
+
+    #[test]
+    fn test_out_sam_flag_or_and_applied_to_mapped_record() {
+        use cigar::op::{Kind, Op};
+        let genome = make_test_genome();
+        // OR in 0x200 (QC-fail); AND out 0x10 (reverse) via 65535 & !16 = 65519.
+        let params = Parameters::parse_from([
+            "rustar-aligner",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMflagOR",
+            "512",
+            "--outSAMflagAND",
+            "65519",
+        ]);
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 50,
+            is_reverse: true,
+            exons: vec![],
+            cigar: vec![Op::new(Kind::Match, 50)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 4],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let records = SamWriter::build_alignment_records(
+            "read1",
+            &read_seq,
+            &read_qual,
+            std::slice::from_ref(&transcript),
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        // REVERSE_COMPLEMENTED (0x10) was set by the transcript but AND-ed out;
+        // QC_FAIL (0x200) was OR-ed in.
+        assert!(!records[0].flags().is_reverse_complemented());
+        assert!(records[0].flags().is_qc_fail());
     }
 
     #[test]

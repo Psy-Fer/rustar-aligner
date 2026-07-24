@@ -499,6 +499,14 @@ pub struct Parameters {
     #[arg(long = "outSAMmultNmax", default_value_t = -1, allow_hyphen_values = true)]
     pub out_sam_mult_nmax: i32,
 
+    /// Bits OR-ed into every mapped record's FLAG (`--outSAMflagOR`, default 0)
+    #[arg(long = "outSAMflagOR", default_value_t = 0)]
+    pub out_sam_flag_or: u32,
+
+    /// Bits AND-ed into every mapped record's FLAG (`--outSAMflagAND`, default 65535 = keep all)
+    #[arg(long = "outSAMflagAND", default_value_t = 65535)]
+    pub out_sam_flag_and: u32,
+
     /// Output filter type: Normal or BySJout
     #[arg(long = "outFilterType", default_value = "Normal")]
     pub out_filter_type: OutFilterType,
