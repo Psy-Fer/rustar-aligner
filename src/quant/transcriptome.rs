@@ -23,12 +23,20 @@ use std::path::Path;
 /// GTF attribute names the transcriptome index reads.
 const GTF_ATTR_TRANSCRIPT_ID: &str = "transcript_id";
 const GTF_ATTR_GENE_ID: &str = "gene_id";
-const GTF_ATTR_GENE_NAME: &str = "gene_name";
-const GTF_ATTR_GENE_BIOTYPE: &str = "gene_biotype";
 
 /// STAR's fallback for GTF records missing `gene_biotype`
 /// (`source/GTF.cpp`).
 const MISSING_GENE_TYPE: &str = "MissingGeneType";
+
+/// STAR's `find_attr_list` (`GTF.cpp`): the last of `tags`, in list order, that has an entry in
+/// `attrs`. `--sjdbGTFtagExonParentGeneName`/`GeneType` accept several candidate keys; when more
+/// than one matches, the last one in the list wins.
+fn find_attr_list(attrs: &HashMap<String, String>, tags: &[String]) -> Option<String> {
+    tags.iter()
+        .filter_map(|t| attrs.get(t))
+        .next_back()
+        .cloned()
+}
 
 // ---------------------------------------------------------------------------
 // Filter-mode enum + softclip extension (subtask 3)
@@ -151,11 +159,16 @@ impl TranscriptomeIndex {
     ///
     /// `transcript_tag`: STAR `sjdbGTFtagExonParentTranscript` (default `"transcript_id"`).
     /// `gene_tag`: STAR `sjdbGTFtagExonParentGene` (default `"gene_id"`).
+    /// `gene_name_tags`/`gene_type_tags`: STAR `sjdbGTFtagExonParentGeneName`/`GeneType`
+    /// (defaults `["gene_name"]` / `["gene_type", "gene_biotype"]`); when several candidate keys
+    /// match, the last one in the list wins.
     pub fn from_gtf_exons_configured(
         exons: &[GtfRecord],
         genome: &Genome,
         transcript_tag: &str,
         gene_tag: &str,
+        gene_name_tags: &[String],
+        gene_type_tags: &[String],
     ) -> Result<Self, Error> {
         // Group exons by transcript_tag, preserving first-seen insertion order.
         let mut order: Vec<String> = Vec::new();
@@ -270,15 +283,9 @@ impl TranscriptomeIndex {
             // STAR-faithful fallbacks: when the GTF record omits gene_name,
             // STAR's GTF.cpp writes geneAttr[ig][0] = gene_id (not empty).
             // When gene_biotype is omitted, it writes `MISSING_GENE_TYPE`.
-            let gene_name = first
-                .attributes
-                .get(GTF_ATTR_GENE_NAME)
-                .cloned()
+            let gene_name = find_attr_list(&first.attributes, gene_name_tags)
                 .unwrap_or_else(|| gene_id.clone());
-            let gene_biotype = first
-                .attributes
-                .get(GTF_ATTR_GENE_BIOTYPE)
-                .cloned()
+            let gene_biotype = find_attr_list(&first.attributes, gene_type_tags)
                 .unwrap_or_else(|| MISSING_GENE_TYPE.to_string());
 
             // Intern the gene — first transcript for each gene_id wins the
@@ -355,7 +362,14 @@ impl TranscriptomeIndex {
 
     /// Build from already-parsed GTF exon records using default STAR attribute names.
     pub fn from_gtf_exons(exons: &[GtfRecord], genome: &Genome) -> Result<Self, Error> {
-        Self::from_gtf_exons_configured(exons, genome, GTF_ATTR_TRANSCRIPT_ID, GTF_ATTR_GENE_ID)
+        Self::from_gtf_exons_configured(
+            exons,
+            genome,
+            GTF_ATTR_TRANSCRIPT_ID,
+            GTF_ATTR_GENE_ID,
+            &["gene_name".to_string()],
+            &["gene_type".to_string(), "gene_biotype".to_string()],
+        )
     }
 
     /// Number of transcripts indexed.
@@ -1550,6 +1564,73 @@ mod tests {
             vec!["protein_coding".to_string(), "MissingGeneType".to_string()]
         );
         assert_eq!(idx.tr_gene_idx, vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn gene_type_attribute_is_a_default_fallback_for_gene_biotype() {
+        // GENCODE-style GTFs use `gene_type`, not `gene_biotype`. The default
+        // `--sjdbGTFtagExonParentGeneType` candidate list (`["gene_type", "gene_biotype"]`) must
+        // pick it up even when `gene_biotype` is absent.
+        let genome = make_genome();
+        let exons = vec![make_exon_with_attrs(
+            "chr1",
+            101,
+            200,
+            '+',
+            "T1",
+            &[("gene_id", "G1"), ("gene_type", "lncRNA")],
+        )];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        assert_eq!(idx.gene_biotypes, vec!["lncRNA".to_string()]);
+    }
+
+    #[test]
+    fn gene_biotype_wins_over_gene_type_when_both_present() {
+        // Default candidate order is `["gene_type", "gene_biotype"]`; the last match in the list
+        // wins, so `gene_biotype` takes precedence over `gene_type`.
+        let genome = make_genome();
+        let exons = vec![make_exon_with_attrs(
+            "chr1",
+            101,
+            200,
+            '+',
+            "T1",
+            &[
+                ("gene_id", "G1"),
+                ("gene_type", "lncRNA"),
+                ("gene_biotype", "protein_coding"),
+            ],
+        )];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        assert_eq!(idx.gene_biotypes, vec!["protein_coding".to_string()]);
+    }
+
+    #[test]
+    fn custom_gene_name_and_type_tags_are_configurable() {
+        let genome = make_genome();
+        let exons = vec![make_exon_with_attrs(
+            "chr1",
+            101,
+            200,
+            '+',
+            "T1",
+            &[
+                ("gene_id", "G1"),
+                ("gene_symbol", "GENE1"),
+                ("gene_class", "custom_class"),
+            ],
+        )];
+        let idx = TranscriptomeIndex::from_gtf_exons_configured(
+            &exons,
+            &genome,
+            "transcript_id",
+            "gene_id",
+            &["gene_symbol".to_string()],
+            &["gene_class".to_string()],
+        )
+        .unwrap();
+        assert_eq!(idx.gene_names, vec!["GENE1".to_string()]);
+        assert_eq!(idx.gene_biotypes, vec!["custom_class".to_string()]);
     }
 
     #[test]

@@ -715,6 +715,20 @@ pub struct Parameters {
     #[arg(long = "sjdbGTFtagExonParentGene", default_value = "gene_id")]
     pub sjdb_gtf_tag_exon_parent_gene: String,
 
+    /// GTF attribute name(s) for parent gene name of exon features; when several are given and
+    /// several match, the last one in the list wins
+    #[arg(long = "sjdbGTFtagExonParentGeneName", default_values_t = vec!["gene_name".to_string()], num_args = 1..)]
+    pub sjdb_gtf_tag_exon_parent_gene_name: Vec<String>,
+
+    /// GTF attribute name(s) for parent gene type of exon features; when several are given and
+    /// several match, the last one in the list wins
+    #[arg(
+        long = "sjdbGTFtagExonParentGeneType",
+        default_values_t = vec!["gene_type".to_string(), "gene_biotype".to_string()],
+        num_args = 1..
+    )]
+    pub sjdb_gtf_tag_exon_parent_gene_type: Vec<String>,
+
     /// Overhang length for splice junction database
     #[arg(long = "sjdbOverhang", default_value_t = 100)]
     pub sjdb_overhang: u32,

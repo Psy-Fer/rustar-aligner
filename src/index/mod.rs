@@ -295,6 +295,8 @@ impl GenomeIndex {
                 &genome,
                 &params.sjdb_gtf_tag_exon_parent_transcript,
                 &params.sjdb_gtf_tag_exon_parent_gene,
+                &params.sjdb_gtf_tag_exon_parent_gene_name,
+                &params.sjdb_gtf_tag_exon_parent_gene_type,
             )?;
             log::info!(
                 "Transcriptome index built from GTF: {} transcripts, {} genes",
