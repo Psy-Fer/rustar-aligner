@@ -189,11 +189,16 @@ impl SpliceJunctionStats {
                 if (*max_overhang as i32) < overhang_min[cat] {
                     continue;
                 }
-                if (*unique as i32) < unique_min[cat] {
-                    continue;
-                }
+                // STAR keeps a junction if EITHER the unique count OR the total
+                // (unique+multi) count meets its threshold — an OR, not an AND
+                // (STAR manual; confirmed against STAR source and STAR-rs
+                // `star_sj.rs`). Testing them as two independent drop-guards was
+                // an AND, which discarded every junction supported only by
+                // multi-mapping reads (unique==0) — the cause of rustar-aligner
+                // reporting far fewer novel junctions than STAR. Drop only when
+                // BOTH thresholds fail.
                 let total = unique + multi;
-                if (total as i32) < total_min[cat] {
+                if (*unique as i32) < unique_min[cat] && (total as i32) < total_min[cat] {
                     continue;
                 }
                 if dist_min[cat] > 0 && min_dist_to_neighbor[idx] < dist_min[cat] as u64 {
@@ -645,7 +650,7 @@ mod tests {
     fn test_compute_surviving_junctions_basic() {
         let stats = SpliceJunctionStats::new();
 
-        // High-quality canonical junction (should survive)
+        // High-quality canonical junction, unique read (should survive)
         stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 50, false);
 
         // Low-overhang non-canonical junction (should be filtered: 10 < 30)
@@ -653,18 +658,32 @@ mod tests {
             stats.record_junction(0, 300, 400, 1, SpliceMotif::NonCanonical, true, 10, false);
         }
 
-        // Low-count canonical junction (unique=0 < 1)
+        // Canonical junction supported ONLY by a multi-mapper (unique=0, total=1).
+        // STAR keeps it via the OR count filter: total(1) >= CountTotalMin[canonical](1).
         stats.record_junction(0, 500, 600, 1, SpliceMotif::GtAg, false, 20, false);
+
+        // Non-canonical junction with too few reads (unique=0 and total=1, both
+        // below CountUniqueMin/CountTotalMin[non-canonical]=3) but good overhang:
+        // fails the OR count filter on BOTH branches -> filtered.
+        stats.record_junction(0, 700, 800, 1, SpliceMotif::NonCanonical, false, 40, false);
 
         let params = default_params();
         let surviving = stats.compute_surviving_junctions(&params);
 
-        // Only the first junction should survive
-        assert_eq!(surviving.len(), 1);
+        // The unique canonical and the multi-only canonical survive; the
+        // low-overhang and low-count non-canonical junctions are filtered.
+        assert_eq!(surviving.len(), 2);
         assert!(surviving.contains(&SjKey {
             chr_idx: 0,
             intron_start: 100,
             intron_end: 200,
+            strand: 1,
+            motif: 1,
+        }));
+        assert!(surviving.contains(&SjKey {
+            chr_idx: 0,
+            intron_start: 500,
+            intron_end: 600,
             strand: 1,
             motif: 1,
         }));

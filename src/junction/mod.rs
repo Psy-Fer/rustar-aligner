@@ -197,11 +197,18 @@ pub fn filter_novel_junctions(
             let min_overhang = params.out_sj_filter_overhang_min[cat] as u32;
             let has_overhang = max_overhang >= min_overhang;
 
-            // Coverage threshold (motif-specific)
+            // Coverage threshold (motif-specific). STAR keeps a junction if EITHER
+            // the unique-read count OR the total (unique+multi) count meets its
+            // threshold — an OR, not an AND (STAR manual: "Junctions are output if
+            // one of outSJfilterCountUniqueMin OR outSJfilterCountTotalMin
+            // conditions are satisfied"; confirmed against STAR's source and the
+            // byte-faithful STAR-rs `star_sj.rs`). Using AND here dropped every
+            // junction supported only by multi-mapping reads (unique==0), which is
+            // why rustar-aligner reported far fewer novel junctions than STAR.
             let min_unique = params.out_sj_filter_count_unique_min[cat] as u32;
             let min_total = params.out_sj_filter_count_total_min[cat] as u32;
             let total = unique + multi;
-            let has_coverage = unique >= min_unique && total >= min_total;
+            let has_coverage = unique >= min_unique || total >= min_total;
 
             // Intron length threshold
             let intron_len = key.intron_end.saturating_sub(key.intron_start) + 1;
