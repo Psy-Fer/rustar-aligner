@@ -272,6 +272,34 @@ impl std::str::FromStr for OutSamPrimaryFlag {
 }
 
 // ---------------------------------------------------------------------------
+// SAM read-ID naming
+// ---------------------------------------------------------------------------
+
+/// QNAME source for SAM/FASTX output (`--outSAMreadID`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutSamReadId {
+    /// Use the FASTQ read name as-is (default).
+    #[default]
+    Standard,
+    /// Replace the QNAME with the read's 1-based input index, uniformly across every record
+    /// (mapped, unmapped, FASTX) the read emits.
+    Number,
+}
+
+impl std::str::FromStr for OutSamReadId {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Standard" => Ok(Self::Standard),
+            "Number" => Ok(Self::Number),
+            _ => Err(format!(
+                "unknown outSAMreadID value: '{s}'; expected 'Standard' or 'Number'"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Two-pass mode
 // ---------------------------------------------------------------------------
 
@@ -541,6 +569,11 @@ pub struct Parameters {
     /// Start value of the `HI` SAM attribute (STAR default 1; CellRanger convention uses 0)
     #[arg(long = "outSAMattrIHstart", default_value_t = 1)]
     pub out_sam_attr_ih_start: u32,
+
+    /// QNAME source for SAM/FASTX output: `Standard` (default, the FASTQ read name) or
+    /// `Number` (the read's 1-based input index)
+    #[arg(long = "outSAMreadID", default_value = "Standard")]
+    pub out_sam_read_id: OutSamReadId,
 
     /// Output filter type: Normal or BySJout
     #[arg(long = "outFilterType", default_value = "Normal")]
