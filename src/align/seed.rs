@@ -89,14 +89,27 @@ impl Seed {
             &mut seeds,
         );
 
-        // STAR's storeAligns dedup: same rStart + same Length → skip duplicate.
-        // Multiple istart chains can find the same (read_pos, length, direction) seed.
-        // Keep only the first occurrence (identical SA ranges guaranteed by same sequence).
-        // Matches STAR's OPTIM_STOREaligns_SIMPLE: `if (PC[iP][PC_rStart]==rStart) &&
-        // PC[iP][PC_Length]==L) return; //same alignment as before, do not store!`
+        // STAR's storeAligns keeps the seed array `PC[]` sorted by rStart, with
+        // longer seeds ordered before shorter ones at the same rStart, and drops
+        // exact (rStart, Length) duplicates **regardless of search direction**
+        // (`ReadAlign_storeAligns.cpp`, OPTIM_STOREaligns_SIMPLE). rustar-aligner
+        // previously kept `search_rc` in the dedup key (so a forward seed and its
+        // reverse-search twin were both retained) and left the array in
+        // "all L→R, then all R→L" order. That made window-creation order in
+        // `cluster_seeds` diverge from STAR's, perturbing the earliest-window
+        // primary tie-break and the seed chain chosen through repeats.
+        //
+        // Match STAR: sort by (rStart asc, Length desc) — a *stable* sort so that
+        // among equal (rStart, Length) the earliest-found seed (forward, since
+        // L→R is collected first) is kept — then dedup direction-agnostically.
+        seeds.sort_by(|a, b| {
+            a.read_pos
+                .cmp(&b.read_pos)
+                .then_with(|| b.length.cmp(&a.length))
+        });
         {
             let mut seen = std::collections::HashSet::new();
-            seeds.retain(|s| seen.insert((s.read_pos, s.length, s.search_rc)));
+            seeds.retain(|s| seen.insert((s.read_pos, s.length)));
         }
 
         Ok(seeds)
@@ -854,50 +867,43 @@ mod tests {
     }
 
     #[test]
-    fn test_rl_seeds_found() {
-        // Genome has ACGTACGT. The RC of that is ACGTACGT (palindrome),
-        // so L→R already finds everything. Use an asymmetric sequence instead.
-        // Genome: AACCGGTT — RC genome half has AACCGGTT too.
-        // Read: CCGG — L→R finds it at pos 2 in genome.
-        // RC of read: CCGG — R→L also finds it.
-        // So with this palindromic example, R→L seeds duplicate L→R.
-        // Instead use: Genome = AACCTTGG, Read = CCAAGGTT (= RC of AACCTTGG)
-        // The read itself won't match L→R in forward genome, but its RC (AACCTTGG) will.
+    fn test_direction_agnostic_seed_dedup() {
+        // Genome AACCTTGG; read CCAAGGTT is its reverse-complement, so the whole
+        // read maps as one seed. The L→R pass finds it on the RC strand of the
+        // doubled genome (which contains RC(AACCTTGG)=CCAAGGTT); the R→L pass, on
+        // RC(read)=AACCTTGG, finds the SAME (rStart, length) seed on the forward
+        // strand. STAR's storeAligns dedups (rStart, Length) regardless of search
+        // direction (OPTIM_STOREaligns_SIMPLE), so exactly one copy survives — the
+        // L→R one, collected first.
         let index = make_test_index("AACCTTGG");
-        // Read is RC of genome: CCAAGGTT
         let read = encode_sequence("CCAAGGTT");
         let params = params(&[]);
 
         let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
 
-        // Should have R→L seeds (search_rc == true)
-        let rc_seeds: Vec<_> = seeds.iter().filter(|s| s.search_rc).collect();
-        let lr_seeds: Vec<_> = seeds.iter().filter(|s| !s.search_rc).collect();
-
-        // R→L search should find seeds because RC(read) = AACCTTGG matches genome
+        // Exactly one full-length (read_pos=0, length=8) seed survives dedup.
+        let full: Vec<_> = seeds
+            .iter()
+            .filter(|s| s.read_pos == 0 && s.length == 8)
+            .collect();
+        assert_eq!(
+            full.len(),
+            1,
+            "direction-agnostic dedup should keep exactly one (0,8) seed; got {seeds:?}"
+        );
+        // The survivor is the forward (L→R) seed, since L→R is collected first.
         assert!(
-            !rc_seeds.is_empty(),
-            "R→L search should find seeds (RC of read matches genome). All seeds: {seeds:?}"
+            !full[0].search_rc,
+            "the L→R seed should be the survivor after dedup"
         );
 
-        // Verify R→L seeds have valid read positions
-        for seed in &rc_seeds {
+        // Seeds are sorted by rStart ascending (STAR's PC[] order).
+        for w in seeds.windows(2) {
             assert!(
-                seed.read_pos + seed.length <= read.len(),
-                "R→L seed read_pos {} + length {} exceeds read length {}",
-                seed.read_pos,
-                seed.length,
-                read.len()
+                w[0].read_pos <= w[1].read_pos,
+                "seeds must be sorted by read_pos (rStart): {seeds:?}"
             );
         }
-
-        // Total seeds should be more than just L→R
-        assert!(
-            seeds.len() > lr_seeds.len(),
-            "Total seeds ({}) should exceed L→R seeds ({})",
-            seeds.len(),
-            lr_seeds.len()
-        );
     }
 
     #[test]
@@ -950,35 +956,48 @@ mod tests {
 
     #[test]
     fn test_sparse_rc_read_pos_conversion() {
-        // Genome: AACCTTGG, read is RC of genome: CCAAGGTT
-        // RC(read) = AACCTTGG matches forward genome at pos 0
-        // When searching R→L (is_rc=true), seeds found in the RC read have
-        // positions relative to the RC read. They must be converted back to
-        // original read coordinates: read_pos = original_read_len - rc_pos - length
+        // The R→L pass searches RC(read) and converts positions back to original
+        // read coordinates: read_pos = original_len - rc_pos - length. Drive
+        // search_direction_sparse directly with is_rc=true so the conversion is
+        // exercised in isolation (find_seeds' direction-agnostic dedup would
+        // otherwise drop the R→L seed as a duplicate of the L→R one — see
+        // test_direction_agnostic_seed_dedup).
+        // Genome AACCTTGG; read CCAAGGTT; RC(read)=AACCTTGG matches forward genome.
         let index = make_test_index("AACCTTGG");
         let read = encode_sequence("CCAAGGTT");
+        let rc_read = reverse_complement_read(&read);
         let params = params(&[]);
 
-        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
+        let mut rc_seeds = Vec::new();
+        search_direction_sparse(
+            &rc_read,
+            read.len(),
+            &index,
+            4,
+            &params,
+            true,
+            "",
+            &mut rc_seeds,
+        );
 
-        for seed in &seeds {
-            // All seeds (L→R and R→L) must have valid read positions
-            assert!(
-                seed.read_pos + seed.length <= read.len(),
-                "Seed read_pos {} + length {} exceeds read len {} (search_rc={})",
-                seed.read_pos,
-                seed.length,
-                read.len(),
-                seed.search_rc
-            );
-        }
-
-        // Should have R→L seeds
-        let rc_seeds: Vec<_> = seeds.iter().filter(|s| s.search_rc).collect();
         assert!(
             !rc_seeds.is_empty(),
-            "Should have R→L seeds with valid read positions"
+            "R→L search should find seeds (RC(read) matches the forward genome)"
         );
+        for seed in &rc_seeds {
+            assert!(
+                seed.search_rc,
+                "seeds from the R→L pass must have search_rc=true"
+            );
+            // Converted read positions must be valid original-read coordinates.
+            assert!(
+                seed.read_pos + seed.length <= read.len(),
+                "converted R→L read_pos {} + length {} exceeds read len {}",
+                seed.read_pos,
+                seed.length,
+                read.len()
+            );
+        }
     }
 
     #[test]
