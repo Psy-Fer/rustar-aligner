@@ -1562,6 +1562,16 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
 
             // Flush chimeric output if enabled
             if let Some(ref mut chim_writer) = chimeric_writer {
+                // --chimOutJunctionFormat 1: STAR-Fusion comment trailer with read counts
+                // (# Nreads <total>\tNreadsUnique <uniquely_mapped>\tNreadsMulti <multi_mapped>).
+                if params.chim_out_junction_format == 1 {
+                    use std::sync::atomic::Ordering;
+                    let command_line = params.command_line.as_deref().unwrap_or("");
+                    let n_reads = stats.total_reads.load(Ordering::Relaxed);
+                    let n_unique = stats.uniquely_mapped.load(Ordering::Relaxed);
+                    let n_multi = stats.multi_mapped.load(Ordering::Relaxed);
+                    chim_writer.write_format1_trailer(command_line, n_reads, n_unique, n_multi)?;
+                }
                 chim_writer.flush()?;
                 info!("Chimeric junction output complete");
             }
@@ -2716,6 +2726,16 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
 
             // Flush chimeric output if enabled
             if let Some(ref mut chim_writer) = chimeric_writer {
+                // --chimOutJunctionFormat 1: STAR-Fusion comment trailer with read counts
+                // (# Nreads <total>\tNreadsUnique <uniquely_mapped>\tNreadsMulti <multi_mapped>).
+                if params.chim_out_junction_format == 1 {
+                    use std::sync::atomic::Ordering;
+                    let command_line = params.command_line.as_deref().unwrap_or("");
+                    let n_reads = stats.total_reads.load(Ordering::Relaxed);
+                    let n_unique = stats.uniquely_mapped.load(Ordering::Relaxed);
+                    let n_multi = stats.multi_mapped.load(Ordering::Relaxed);
+                    chim_writer.write_format1_trailer(command_line, n_reads, n_unique, n_multi)?;
+                }
                 chim_writer.flush()?;
             }
 

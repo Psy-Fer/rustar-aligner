@@ -102,6 +102,29 @@ impl ChimericJunctionWriter {
             .flush()
             .map_err(|e| Error::Chimeric(format!("Failed to flush chimeric junction file: {e}")))
     }
+
+    /// `--chimOutJunctionFormat 1` (STAR-Fusion): append a comment header line (version + command
+    /// line) then a `# Nreads .. NreadsUnique .. NreadsMulti ..` count summary, after all junction
+    /// lines have been written.
+    pub fn write_format1_trailer(
+        &mut self,
+        command_line: &str,
+        n_reads: u64,
+        n_reads_unique: u64,
+        n_reads_multi: u64,
+    ) -> Result<(), Error> {
+        writeln!(
+            self.writer,
+            "# {}   {command_line}",
+            env!("CARGO_PKG_VERSION")
+        )
+        .map_err(|e| Error::Chimeric(format!("Failed to write chimeric format-1 header: {e}")))?;
+        writeln!(
+            self.writer,
+            "# Nreads {n_reads}\tNreadsUnique {n_reads_unique}\tNreadsMulti {n_reads_multi}"
+        )
+        .map_err(|e| Error::Chimeric(format!("Failed to write chimeric format-1 counts: {e}")))
+    }
 }
 
 /// Build two SAM records for `--chimOutType WithinBAM`.
@@ -278,6 +301,30 @@ mod tests {
         let mut path = prefix_path.clone();
         path.push("Chimeric.out.junction");
         assert!(path.exists(), "chim output file should exist at {path:?}");
+    }
+
+    #[test]
+    fn test_chim_out_junction_format1_trailer() {
+        let dir = tempdir().unwrap();
+        let prefix = format!("{}/", dir.path().display());
+        let path = PathBuf::from(format!("{prefix}Chimeric.out.junction"));
+
+        let mut writer = ChimericJunctionWriter::new(&prefix).unwrap();
+        writer
+            .write_format1_trailer("star --runMode alignReads", 100, 5, 0)
+            .unwrap();
+        writer.flush().unwrap();
+
+        let mut contents = String::new();
+        File::open(&path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("# "));
+        assert!(lines[0].contains("star --runMode alignReads"));
+        assert_eq!(lines[1], "# Nreads 100\tNreadsUnique 5\tNreadsMulti 0");
     }
 
     #[test]
