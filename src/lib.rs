@@ -25,6 +25,7 @@ pub mod error;
 pub mod params;
 
 pub mod align;
+pub mod bam_dedup;
 pub mod chimeric;
 pub mod cpu;
 pub mod genome;
@@ -71,6 +72,7 @@ pub fn run(params: &Parameters) -> anyhow::Result<()> {
     match params.run_mode {
         RunMode::GenomeGenerate => genome_generate(params),
         RunMode::AlignReads => align_reads(params),
+        RunMode::InputAlignmentsFromBAM => bam_dedup::run(params),
     }
 }
 

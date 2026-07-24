@@ -35,6 +35,7 @@ pub use sam::{OutSamFormat, OutSamSortOrder, OutSamType, OutSamUnmapped, SamAttr
 pub enum RunMode {
     AlignReads,
     GenomeGenerate,
+    InputAlignmentsFromBAM,
 }
 
 impl std::str::FromStr for RunMode {
@@ -43,8 +44,10 @@ impl std::str::FromStr for RunMode {
         match s {
             "alignReads" => Ok(Self::AlignReads),
             "genomeGenerate" => Ok(Self::GenomeGenerate),
+            "inputAlignmentsFromBAM" => Ok(Self::InputAlignmentsFromBAM),
             _ => Err(format!(
-                "unknown runMode '{s}'; expected 'alignReads' or 'genomeGenerate'"
+                "unknown runMode '{s}'; expected 'alignReads', 'genomeGenerate', or \
+                 'inputAlignmentsFromBAM'"
             )),
         }
     }
@@ -55,6 +58,7 @@ impl std::fmt::Display for RunMode {
         match self {
             Self::AlignReads => write!(f, "alignReads"),
             Self::GenomeGenerate => write!(f, "genomeGenerate"),
+            Self::InputAlignmentsFromBAM => write!(f, "inputAlignmentsFromBAM"),
         }
     }
 }
@@ -423,6 +427,23 @@ pub struct Parameters {
     /// Output file name prefix (including path)
     #[arg(long = "outFileNamePrefix", default_value = "./")]
     pub out_file_name_prefix: String,
+
+    /// (`--runMode inputAlignmentsFromBAM`) the input BAM to re-process
+    #[arg(long = "inputBAMfile", default_value = "-")]
+    pub input_bam_file: String,
+
+    /// (`--runMode inputAlignmentsFromBAM`) mark PCR duplicates in the input BAM: `-` = off,
+    /// `UniqueIdentical` (marks multimappers too) or `UniqueIdenticalNotMulti` (leaves them unmarked)
+    #[arg(long = "bamRemoveDuplicatesType", default_value = "-")]
+    pub bam_remove_duplicates_type: String,
+
+    /// Compare this many mate-2 SEQ bases when deduplicating (RAMPAGE); 0 = don't compare SEQ
+    #[arg(
+        long = "bamRemoveDuplicatesMate2basesN",
+        default_value_t = 0,
+        allow_hyphen_values = true
+    )]
+    pub bam_remove_duplicates_mate2_bases_n: i64,
 
     #[command(flatten)]
     pub out_sam_type: OutSamType,
@@ -1161,6 +1182,29 @@ impl Parameters {
                 return Err(command.error(
                     ErrorKind::InvalidValue,
                     "--genomeTransformType is incompatible with --sjdbGTFfile",
+                ));
+            }
+        }
+
+        // inputAlignmentsFromBAM: only --bamRemoveDuplicatesType is implemented so far
+        if params.run_mode == RunMode::InputAlignmentsFromBAM {
+            let dedup = params.bam_remove_duplicates_type.as_str();
+            if dedup == "-" {
+                return Err(command.error(
+                    ErrorKind::MissingRequiredArgument,
+                    "--runMode inputAlignmentsFromBAM requires --bamRemoveDuplicatesType \
+                     (UniqueIdentical or UniqueIdenticalNotMulti)",
+                ));
+            }
+            if !dedup.eq_ignore_ascii_case("UniqueIdentical")
+                && !dedup.eq_ignore_ascii_case("UniqueIdenticalNotMulti")
+            {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    format!(
+                        "unknown --bamRemoveDuplicatesType {dedup}; expected UniqueIdentical or \
+                         UniqueIdenticalNotMulti"
+                    ),
                 ));
             }
         }
