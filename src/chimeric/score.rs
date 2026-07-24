@@ -171,6 +171,7 @@ mod tests {
 
     fn mock_genome_with_sequence(seq: Vec<u8>) -> Genome {
         Genome {
+            transform_blocks: None,
             sequence: seq.into(),
             n_genome: 100,
             n_genome_real: 100,

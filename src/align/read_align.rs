@@ -1498,6 +1498,7 @@ mod tests {
         }
 
         let genome = Genome {
+            transform_blocks: None,
             sequence: sequence.into(),
             n_genome,
             n_genome_real: n_genome,

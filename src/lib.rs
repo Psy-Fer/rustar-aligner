@@ -104,6 +104,24 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
     // + `write` remains for tests / random-access callers.
     GenomeIndex::generate_streaming(params)?;
 
+    // --genomeTransformType Haploid: also write the untransformed index to
+    // `<genomeDir>/OriginalGenome/` (STAR's own layout), by re-running the same
+    // build with the transform disabled and the output directory redirected.
+    // `transformGenomeBlocks.tsv` (the reverse-conversion block map) was already
+    // written into `genomeDir` above, as part of the transformed Genome's own
+    // `write_index_files` call.
+    if params.genome_transform_type.eq_ignore_ascii_case("Haploid") {
+        let mut orig_params = params.clone();
+        orig_params.genome_transform_type = "None".to_string();
+        orig_params.genome_transform_vcf = None;
+        orig_params.genome_dir = params.genome_dir.join("OriginalGenome");
+        info!(
+            "genomeTransformType Haploid: writing untransformed index to {}",
+            orig_params.genome_dir.display()
+        );
+        GenomeIndex::generate_streaming(&orig_params)?;
+    }
+
     info!("Genome generation complete!");
     Ok(())
 }

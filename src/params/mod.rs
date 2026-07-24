@@ -372,6 +372,16 @@ pub struct Parameters {
     #[arg(long = "genomeSAsparseD", default_value_t = 1)]
     pub genome_sa_sparse_d: u32,
 
+    /// Substitute VCF alleles into the genome at genomeGenerate (`None` or
+    /// `Haploid`). Requires `--genomeTransformVCF`; incompatible with
+    /// `--sjdbGTFfile`. `Diploid` is not implemented (see `Parameters::validate`)
+    #[arg(long = "genomeTransformType", default_value = "None")]
+    pub genome_transform_type: String,
+
+    /// VCF of variants for `--genomeTransformType`
+    #[arg(long = "genomeTransformVCF")]
+    pub genome_transform_vcf: Option<PathBuf>,
+
     // ── Read files ──────────────────────────────────────────────────────
     /// Input read file(s); second file is mate 2 for paired-end
     #[arg(long = "readFilesIn", num_args = 1..=2)]
@@ -1107,6 +1117,37 @@ impl Parameters {
                 ErrorKind::MissingRequiredArgument,
                 "--readFilesIn is required when --runMode alignReads",
             ));
+        }
+
+        // --genomeTransformType: only Haploid is implemented (Diploid substitutes
+        // and duplicates the genome into two haplotypes; not yet ported). Requires
+        // a VCF, and is incompatible with a GTF (STAR itself doesn't combine
+        // genomeTransform with sjdb annotation at genomeGenerate).
+        if !params.genome_transform_type.eq_ignore_ascii_case("None") {
+            if params.genome_transform_type.eq_ignore_ascii_case("Diploid") {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    "--genomeTransformType Diploid is not implemented; use --genomeTransformType Haploid",
+                ));
+            }
+            if !params.genome_transform_type.eq_ignore_ascii_case("Haploid") {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    "--genomeTransformType must be None or Haploid",
+                ));
+            }
+            if params.genome_transform_vcf.is_none() {
+                return Err(command.error(
+                    ErrorKind::MissingRequiredArgument,
+                    "--genomeTransformType Haploid requires --genomeTransformVCF",
+                ));
+            }
+            if params.sjdb_gtf_file.is_some() {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    "--genomeTransformType is incompatible with --sjdbGTFfile",
+                ));
+            }
         }
 
         // quantMode GeneCounts requires a GTF file

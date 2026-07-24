@@ -1,4 +1,5 @@
 pub mod fasta;
+pub mod transform;
 
 use std::path::Path;
 
@@ -140,6 +141,32 @@ pub struct Genome {
     /// Padded start positions of each chromosome in the genome.
     /// Length = n_chr_real + 1; the last entry is n_genome (total size).
     pub chr_start: Vec<u64>,
+
+    /// `--genomeTransformType Haploid` block map (`[orig_start, length, new_start]`,
+    /// forward-genome coordinates), `None` unless a transform was applied. Written
+    /// to `transformGenomeBlocks.tsv` by [`write_index_files`](Self::write_index_files).
+    pub transform_blocks: Option<Vec<[u64; 3]>>,
+}
+
+/// Compute STAR's bin-padded chromosome start offsets: `chr_start[i]` is chromosome
+/// `i`'s 0-based start in the padded forward genome; the trailing `chr_start[n]` is
+/// the total padded (forward) genome size. Shared by [`Genome::from_fasta`] and
+/// [`transform`] (which must reproduce the same padding independently, once over
+/// the original chromosome lengths and once over the transformed ones).
+pub(crate) fn compute_chr_starts(chr_lengths: &[u64], chr_bin_nbits: u32) -> Vec<u64> {
+    let bin_size = 1u64 << chr_bin_nbits;
+    let mut chr_start = Vec::with_capacity(chr_lengths.len() + 1);
+    let mut n: u64 = 0;
+    for &len in chr_lengths {
+        if n > 0 {
+            n = ((n + 1) / bin_size + 1) * bin_size;
+        }
+        chr_start.push(n);
+        n += len;
+    }
+    n = ((n + 1) / bin_size + 1) * bin_size;
+    chr_start.push(n);
+    chr_start
 }
 
 impl Genome {
@@ -151,46 +178,46 @@ impl Genome {
     /// # Returns
     /// A `Genome` with forward + reverse complement sequences and metadata.
     pub fn from_fasta(params: &Parameters) -> Result<Self, Error> {
-        let chromosomes = parse_fasta_files(&params.genome_fasta_files)?;
-
-        // Compute padding bin size
+        let mut chromosomes = parse_fasta_files(&params.genome_fasta_files)?;
         let bin_nbits = params.genome_chr_bin_nbits;
-        let bin_size = 1u64 << bin_nbits;
 
-        // First pass: compute padded positions and total genome size
+        // --genomeTransformType Haploid: substitute the VCF alleles into the
+        // chromosome sequences before padding/SA build. Indels shift lengths;
+        // Genome::from_fasta's own padding pass (below) re-derives chr_start
+        // from the (now transformed) chromosome lengths, so it automatically
+        // matches the block map's `new_start` globalization in `transform`.
+        let transform_blocks = if params.genome_transform_type.eq_ignore_ascii_case("Haploid") {
+            let vcf_path = params
+                .genome_transform_vcf
+                .as_ref()
+                .expect("validated: Haploid requires --genomeTransformVCF");
+            let vcf_text = std::fs::read_to_string(vcf_path).map_err(|e| Error::io(e, vcf_path))?;
+            let chr_name: Vec<String> = chromosomes.iter().map(|c| c.name.clone()).collect();
+            let variants = transform::parse_vcf_haploid(&vcf_text, &chr_name);
+            let transformed = transform::transform_chromosomes(&chromosomes, &variants, bin_nbits);
+            chromosomes = transformed.chromosomes;
+            Some(transformed.blocks)
+        } else {
+            None
+        };
+
+        // First pass: chromosome names/lengths, validating non-zero length.
         let mut chr_name = Vec::new();
         let mut chr_length = Vec::new();
-        let mut chr_start = Vec::new();
-
-        let mut n: u64 = 0; // current position in the padded genome
-
         for chrom in &chromosomes {
             let len = chrom.sequence.len() as u64;
-
             if len == 0 {
                 return Err(Error::Fasta(format!(
                     "chromosome '{}' has zero length",
                     chrom.name
                 )));
             }
-
-            // Apply STAR's padding formula before this chromosome (except for the first)
-            if n > 0 {
-                n = ((n + 1) / bin_size + 1) * bin_size;
-            }
-
             chr_name.push(chrom.name.clone());
             chr_length.push(len);
-            chr_start.push(n);
-
-            n += len;
         }
 
-        // Final padding after the last chromosome
-        n = ((n + 1) / bin_size + 1) * bin_size;
-        let n_genome = n;
-        chr_start.push(n_genome); // STAR adds this extra entry
-
+        let chr_start = compute_chr_starts(&chr_length, bin_nbits);
+        let n_genome = *chr_start.last().unwrap();
         let n_chr_real = chromosomes.len();
 
         // Allocate buffer: forward (0..n_genome) + reverse (n_genome..2*n_genome)
@@ -219,6 +246,7 @@ impl Genome {
             chr_name,
             chr_length,
             chr_start,
+            transform_blocks,
         })
     }
 
@@ -354,6 +382,13 @@ impl Genome {
         // keys via `<<` streaming; the leading `###` comment lines are
         // skipped.
         self.write_genome_parameters_txt(dir, params)?;
+
+        // --genomeTransformType Haploid: the block map for reverse conversion.
+        if let Some(blocks) = &self.transform_blocks {
+            let blocks_path = dir.join("transformGenomeBlocks.tsv");
+            fs::write(&blocks_path, transform::blocks_to_tsv(blocks))
+                .map_err(|e| Error::io(e, &blocks_path))?;
+        }
 
         Ok(())
     }

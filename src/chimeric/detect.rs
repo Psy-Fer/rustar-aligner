@@ -993,6 +993,7 @@ mod tests {
         let n_genome = chr_pad * 2;
         let sequence = vec![0u8; 2 * n_genome as usize];
         Genome {
+            transform_blocks: None,
             sequence: sequence.into(),
             n_genome,
             n_genome_real: n_genome,

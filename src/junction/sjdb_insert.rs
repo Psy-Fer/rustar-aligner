@@ -569,6 +569,7 @@ mod tests {
         let mut seq = forward;
         seq.extend(std::iter::repeat_n(5u8, n));
         Genome {
+            transform_blocks: None,
             sequence: seq.into(),
             n_genome: n as u64,
             n_genome_real: n as u64,
@@ -974,6 +975,7 @@ mod tests {
         let mut seq = vec![5u8; 4000];
         seq[..2000].copy_from_slice(&vec![0u8; 2000]);
         let genome = Genome {
+            transform_blocks: None,
             sequence: seq.into(),
             n_genome: 2000,
             n_genome_real: 2000,
@@ -1113,6 +1115,7 @@ mod tests {
         let mut seq = vec![5u8; 4000];
         seq[..2000].copy_from_slice(&vec![0u8; 2000]);
         let genome = Genome {
+            transform_blocks: None,
             sequence: seq.into(),
             n_genome: 2000,
             n_genome_real: 2000,

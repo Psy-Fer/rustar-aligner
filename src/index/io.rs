@@ -241,6 +241,9 @@ fn load_genome(genome_dir: &Path, _params: &Parameters) -> Result<Genome, Error>
         chr_name,
         chr_length,
         chr_start,
+        // Loading transformGenomeBlocks.tsv back is only needed for the
+        // (not yet implemented) align-time back-transform.
+        transform_blocks: None,
     })
 }
 

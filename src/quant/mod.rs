@@ -578,6 +578,7 @@ mod tests {
 
     fn make_genome() -> Genome {
         Genome {
+            transform_blocks: None,
             sequence: vec![0u8; 2000].into(),
             n_genome: 2000,
             n_genome_real: 2000,

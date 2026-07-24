@@ -1378,6 +1378,7 @@ mod tests {
 
     fn make_genome() -> Genome {
         Genome {
+            transform_blocks: None,
             sequence: vec![0u8; 3000].into(),
             n_genome: 3000,
             n_genome_real: 3000,
@@ -2293,6 +2294,7 @@ mod tests {
         // Aligned region [104, 144) — fill with zeros (A) so read bases match
         seq[104..144].fill(0);
         let genome = Genome {
+            transform_blocks: None,
             sequence: seq.into(),
             n_genome: 1000,
             n_genome_real: 1000,
@@ -2346,6 +2348,7 @@ mod tests {
         // Aligned region [104, 144): all zeros
         seq[104..144].fill(0);
         let genome = Genome {
+            transform_blocks: None,
             sequence: seq.into(),
             n_genome: 1000,
             n_genome_real: 1000,
