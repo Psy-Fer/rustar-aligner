@@ -370,7 +370,13 @@ impl SamWriter {
                 mapq,
                 true, // is_first_mate
                 paired_aln.is_proper_pair,
-                paired_aln.insert_size,
+                paired_tlen(
+                    &paired_aln.mate1_transcript,
+                    &paired_aln.mate2_transcript,
+                    true,
+                    paired_aln.insert_size,
+                    params,
+                ),
                 max_output, // NH = number of reported alignments
                 hit_index,
                 params.out_sam_attr_ih_start,
@@ -393,8 +399,14 @@ impl SamWriter {
                 mapq,
                 false, // is_first_mate
                 paired_aln.is_proper_pair,
-                -paired_aln.insert_size, // Negative for mate2
-                max_output,              // NH = number of reported alignments
+                paired_tlen(
+                    &paired_aln.mate1_transcript,
+                    &paired_aln.mate2_transcript,
+                    false,
+                    -paired_aln.insert_size, // Negative for mate2 (mode 1 default)
+                    params,
+                ),
+                max_output, // NH = number of reported alignments
                 hit_index,
                 params.out_sam_attr_ih_start,
                 combined_score,
@@ -988,6 +1000,28 @@ fn apply_primary_flag(record: &mut RecordBuf, score: i32, best_score: i32, param
         flags.remove(sam::alignment::record::Flags::SECONDARY);
         *record.flags_mut() = flags;
     }
+}
+
+/// `--outSAMtlen 2`: per-mate span, signed by whichever mate is genomically leftmost (ties go to
+/// mate1). Differs from the default (mode 1, `default_signed`) only for contained/dovetailed
+/// pairs, where mode 1's whole-combined-transcript span and mode 2's per-mate max/min span
+/// diverge.
+fn paired_tlen(
+    mate1: &Transcript,
+    mate2: &Transcript,
+    is_first_mate: bool,
+    default_signed: i32,
+    params: &Parameters,
+) -> i32 {
+    if params.out_sam_tlen != 2 {
+        return default_signed;
+    }
+    let span = (mate1.genome_end.max(mate2.genome_end) - mate1.genome_start.min(mate2.genome_start))
+        as i64;
+    let mate1_is_leftmost = mate1.genome_start <= mate2.genome_start;
+    let this_is_leftmost = mate1_is_leftmost == is_first_mate;
+    let span = span as i32;
+    if this_is_leftmost { span } else { -span }
 }
 
 /// Convert FASTQ ASCII quality bytes (Phred+33) to raw Phred values (0-93) for
@@ -2762,6 +2796,59 @@ mod tests {
         // The secondary FLAG bit is unaffected by IHstart (still rank-based, not tag-value-based).
         assert!(!records[0].flags().is_secondary());
         assert!(records[1].flags().is_secondary());
+    }
+
+    #[test]
+    fn test_out_sam_tlen_mode2_contained_pair() {
+        use cigar::op::{Kind, Op};
+        // mate2 fully contained within mate1's span: [100,200) vs [120,180).
+        // Mode 1 (default) just returns whatever the caller already computed (opaque here).
+        // Mode 2 uses the per-mate max/min span (100) and signs by genomic leftmost (mate1).
+        let mate1 = Transcript {
+            chr_idx: 0,
+            genome_start: 100,
+            genome_end: 200,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![Op::new(Kind::Match, 100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 4],
+        };
+        let mate2 = Transcript {
+            genome_start: 120,
+            genome_end: 180,
+            ..mate1.clone()
+        };
+
+        let params_mode1 = Parameters::parse_from(["rustar-aligner", "--readFilesIn", "test.fq"]);
+        assert_eq!(
+            paired_tlen(&mate1, &mate2, true, 42, &params_mode1),
+            42,
+            "mode 1 (default) passes the caller-computed value through unchanged"
+        );
+
+        let params_mode2 = Parameters::parse_from([
+            "rustar-aligner",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMtlen",
+            "2",
+        ]);
+        assert_eq!(
+            paired_tlen(&mate1, &mate2, true, 42, &params_mode2),
+            100,
+            "mate1 is leftmost -> positive per-mate span"
+        );
+        assert_eq!(
+            paired_tlen(&mate1, &mate2, false, -42, &params_mode2),
+            -100,
+            "mate2 is not leftmost -> negative per-mate span"
+        );
     }
 
     #[test]

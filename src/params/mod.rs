@@ -575,6 +575,11 @@ pub struct Parameters {
     #[arg(long = "outSAMreadID", default_value = "Standard")]
     pub out_sam_read_id: OutSamReadId,
 
+    /// TLEN calculation: 1 (default, whole combined-transcript span) or 2 (per-mate span,
+    /// signed by whichever mate is genomically leftmost)
+    #[arg(long = "outSAMtlen", default_value_t = 1)]
+    pub out_sam_tlen: u8,
+
     /// Output filter type: Normal or BySJout
     #[arg(long = "outFilterType", default_value = "Normal")]
     pub out_filter_type: OutFilterType,
