@@ -2030,14 +2030,17 @@ pub(crate) fn finalize_transcript(
 /// Recursive include/exclude stitcher (STAR's stitchWindowAligns).
 ///
 /// For each WA entry: try including it (call stitch_align_to_transcript to fill gap),
-/// and try excluding it (subject to anchor constraint). Transcripts are finalized
-/// at the base case when all entries have been considered.
+/// and try excluding it. Transcripts are finalized at the base case when all entries
+/// have been considered.
+///
+/// Unlike a naive port, we do NOT force the last anchor to be included: STAR 2.7.11b's
+/// `WlastAnchor` last-anchor-forcing path is dead code (see the EXCLUDE branch below), so
+/// the exclude branch is always explored, matching STAR exactly.
 #[allow(clippy::too_many_arguments)]
 fn stitch_recurse(
     i_a: usize,
     wt: WorkingTranscript,
     wa_entries: &[WindowAlignment],
-    last_anchor_idx: Option<usize>,
     read_seq: &[u8],
     index: &GenomeIndex,
     scorer: &AlignmentScorer,
@@ -2282,7 +2285,6 @@ fn stitch_recurse(
             i_a + 1,
             new_wt,
             wa_entries,
-            last_anchor_idx,
             read_seq,
             index,
             scorer,
@@ -2312,7 +2314,6 @@ fn stitch_recurse(
                 i_a + 1,
                 new_wt,
                 wa_entries,
-                last_anchor_idx,
                 read_seq,
                 index,
                 scorer,
@@ -2328,37 +2329,33 @@ fn stitch_recurse(
         }
     }
 
-    // EXCLUDE branch: skip wa_entries[i_a]
-    // Anchor constraint: can only skip the last anchor if transcript already has one
-    let can_exclude = if let Some(last_anchor) = last_anchor_idx {
-        if wa.is_anchor && i_a == last_anchor {
-            wt.n_anchor > 0 // Already has an anchor → ok to skip
-        } else {
-            true
-        }
-    } else {
-        true
-    };
-
-    if can_exclude {
-        stitch_recurse(
-            i_a + 1,
-            wt,
-            wa_entries,
-            last_anchor_idx,
-            read_seq,
-            index,
-            scorer,
-            cluster,
-            junction_db,
-            max_transcripts,
-            transcripts,
-            recursion_count,
-            align_mates_gap_max,
-            original_is_reverse,
-            debug_name,
-        );
-    }
+    // EXCLUDE branch: skip wa_entries[i_a].
+    //
+    // STAR 2.7.11b never forces a seed to be included. Its `WlastAnchor`
+    // last-anchor-forcing mechanism in stitchWindowAligns.cpp is dead code:
+    // `WlastAnchor` is initialized to UINT64_MAX and its update guard
+    // (`WlastAnchor < iA`) is never satisfied, so no alignment is ever marked
+    // as a forced anchor (`WA_Anchor == 2`) and the exclude branch is always
+    // taken. We match that behavior exactly by always recursing here, rather
+    // than gating on whether this is the last anchor. (Previously this forced
+    // the highest-indexed anchor's inclusion, which STAR does not do and which
+    // could suppress alignments STAR explores.)
+    stitch_recurse(
+        i_a + 1,
+        wt,
+        wa_entries,
+        read_seq,
+        index,
+        scorer,
+        cluster,
+        junction_db,
+        max_transcripts,
+        transcripts,
+        recursion_count,
+        align_mates_gap_max,
+        original_is_reverse,
+        debug_name,
+    );
 }
 
 /// Split a combined-read WorkingTranscript by mate_id into per-mate WorkingTranscripts.
@@ -2954,10 +2951,10 @@ pub(crate) fn stitch_seeds_core(
     // entry for future use in seed ordering (Phase B), but do not filter here.
     let _ = best_pre_score; // suppress unused warning
 
-    // Find last anchor index for the anchor constraint
-    let last_anchor_idx = wa_entries.iter().rposition(|wa| wa.is_anchor);
-
-    // Run recursive include/exclude stitcher
+    // Run recursive include/exclude stitcher.
+    // Note: STAR 2.7.11b does not force the last anchor to be included (its
+    // WlastAnchor mechanism is dead code — see stitch_recurse), so there is no
+    // last-anchor index to thread through here.
     let mut working_transcripts: Vec<WorkingTranscript> = Vec::new();
     let mut recursion_count: u32 = 0;
 
@@ -2965,7 +2962,6 @@ pub(crate) fn stitch_seeds_core(
         0,
         WorkingTranscript::new(),
         &wa_entries,
-        last_anchor_idx,
         stitch_read,
         index,
         scorer,
