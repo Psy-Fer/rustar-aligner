@@ -20,6 +20,10 @@ bitflags::bitflags! {
         const JI = 1 << 6;
         const XS = 1 << 7;
         const RG = 1 << 8;
+        /// STARsolo gene id of the read's Gene-feature assignment (GX:Z).
+        const GX = 1 << 9;
+        /// STARsolo gene name (symbol) of the Gene-feature assignment (GN:Z).
+        const GN = 1 << 10;
 
         const STANDARD =
             Self::NH.bits() | Self::HI.bits() | Self::AS.bits()
@@ -49,6 +53,8 @@ impl FromStr for SamAttributes {
             "jI" => Self::JI,
             "XS" => Self::XS,
             "RG" => Self::RG,
+            "GX" => Self::GX,
+            "GN" => Self::GN,
             other => return Err(format!("unknown --outSAMattributes token '{other}'")),
         })
     }

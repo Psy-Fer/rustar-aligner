@@ -1,0 +1,62 @@
+<svg viewBox="0 0 720 268" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" role="img" aria-labelledby="t d">
+  <title id="t">Human GRCh38 benchmark: align and index-build, time and peak RAM</title>
+  <desc id="d">GRCh38, 10M reads. Align+count wall: STARsolo 94s, rustar 162s, CellRanger 414s; peak RAM rustar 31.1, STAR 30.5, CR 14.0 GB. Index build time: rustar 27.7min, STAR 29.1min; peak RAM rustar 16.7 vs STAR 39.3 GB.</desc>
+  <style>
+    .ttl{font-size:15px;font-weight:500;fill:#1a1a19}
+    .sub{font-size:11.5px;fill:#6b6a64}
+    .pt{font-size:12.5px;font-weight:500;fill:#444441}
+    .lbl{font-size:12px;fill:#3a3a37}
+    .lblh{font-size:12px;font-weight:500;fill:#1f5fa8}
+    .val{font-size:12px;font-weight:500;fill:#1a1a19}
+    .cap{font-size:11px;fill:#898781}
+    @media (prefers-color-scheme:dark){
+      .ttl{fill:#ededea}.sub{fill:#a8a79f}.pt{fill:#cfcec6}.lbl{fill:#cfcec6}
+      .val{fill:#ededea}.cap{fill:#898781}.lblh{fill:#5ea0ec}
+    }
+  </style>
+
+  <text x="20" y="22" class="ttl">Human GRCh38 benchmark — rustar vs STARsolo vs CellRanger</text>
+  <text x="20" y="39" class="sub">10M reads · m6id.4xlarge · 10 threads · local NVMe · Gene/GeneFull/SJ/Velocyto + EmptyDrops · warm · lower is better</text>
+
+  <text x="20"  y="64" class="pt">Align + count — wall time</text>
+  <text x="380" y="64" class="pt">Align + count — peak RAM</text>
+
+  <text x="90" y="88"  class="lblh" text-anchor="end">rustar</text>
+  <rect x="98" y="74" width="68.5" height="20" rx="3" fill="#2a78d6"/>
+  <text x="173" y="88" class="val">162 s</text>
+  <text x="90" y="114" class="lbl" text-anchor="end">STARsolo</text>
+  <rect x="98" y="100" width="39.7" height="20" rx="3" fill="#b4b2a9"/>
+  <text x="145" y="114" class="val">94 s</text>
+  <text x="90" y="140" class="lbl" text-anchor="end">CellRanger</text>
+  <rect x="98" y="126" width="175" height="20" rx="3" fill="#b4b2a9"/>
+  <text x="280" y="140" class="val">414 s</text>
+
+  <text x="450" y="88"  class="lblh" text-anchor="end">rustar</text>
+  <rect x="458" y="74" width="175" height="20" rx="3" fill="#2a78d6"/>
+  <text x="640" y="88" class="val">31.1 GB</text>
+  <text x="450" y="114" class="lbl" text-anchor="end">STARsolo</text>
+  <rect x="458" y="100" width="171.6" height="20" rx="3" fill="#b4b2a9"/>
+  <text x="637" y="114" class="val">30.5 GB</text>
+  <text x="450" y="140" class="lbl" text-anchor="end">CellRanger</text>
+  <rect x="458" y="126" width="78.8" height="20" rx="3" fill="#b4b2a9"/>
+  <text x="544" y="140" class="val">14.0 GB</text>
+
+  <text x="20"  y="182" class="pt">Index build — time</text>
+  <text x="380" y="182" class="pt">Index build — peak RAM</text>
+
+  <text x="90" y="206" class="lblh" text-anchor="end">rustar</text>
+  <rect x="98" y="192" width="166.5" height="20" rx="3" fill="#2a78d6"/>
+  <text x="271" y="206" class="val">27.7 min</text>
+  <text x="90" y="232" class="lbl" text-anchor="end">STARsolo</text>
+  <rect x="98" y="218" width="175" height="20" rx="3" fill="#b4b2a9"/>
+  <text x="280" y="232" class="val">29.1 min</text>
+
+  <text x="450" y="206" class="lblh" text-anchor="end">rustar</text>
+  <rect x="458" y="192" width="74.4" height="20" rx="3" fill="#2a78d6"/>
+  <text x="539" y="206" class="val">16.7 GB</text>
+  <text x="450" y="232" class="lbl" text-anchor="end">STARsolo</text>
+  <rect x="458" y="218" width="175" height="20" rx="3" fill="#b4b2a9"/>
+  <text x="640" y="232" class="val">39.3 GB</text>
+
+  <text x="20" y="258" class="cap">align = median of 3 warm reps (peak RAM is mostly reclaimable mmap'd index for rustar/STAR) · index build n=1 · CellRanger uses a prebuilt reference (no build step)</text>
+</svg>

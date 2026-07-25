@@ -167,7 +167,7 @@ impl SaIndex {
             (1u64 << sa_word_length) - 1
         };
         let n_genome = genome.n_genome as usize;
-        let genome_seq: &[u8] = &genome.sequence;
+        let genome_seq: &[u8] = genome.sequence.as_slice();
 
         // Chunk size: 1 M entries per worker. STAR's algorithm
         // visits at most ~chunk_size / isa_step boundaries per chunk
@@ -495,7 +495,7 @@ impl SaIndex {
                 if genome_pos + (k as usize) > genome.sequence.len() {
                     break;
                 }
-                let next_base = genome.sequence[genome_pos + (k - 1) as usize];
+                let next_base = genome.sequence.base(genome_pos + (k - 1) as usize);
                 if next_base >= 4 {
                     break;
                 }
@@ -565,7 +565,7 @@ impl SaIndexBuilder<'_> {
             if genome_pos + (k as usize) > self.genome.sequence.len() {
                 break;
             }
-            let next_base = self.genome.sequence[genome_pos + (k - 1) as usize];
+            let next_base = self.genome.sequence.base(genome_pos + (k - 1) as usize);
             if next_base >= 4 {
                 break;
             }

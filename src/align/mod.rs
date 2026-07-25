@@ -1,6 +1,7 @@
 pub mod read_align;
 pub mod score;
 pub mod seed;
+mod simd_scan;
 pub mod stitch;
 pub mod transcript;
 

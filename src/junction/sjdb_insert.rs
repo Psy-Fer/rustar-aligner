@@ -222,7 +222,7 @@ const GSJ_SPACING: u8 = 5;
 ///
 /// Stops at genome bounds, on any N-base (code ≥ 4), or at the 255 cap.
 pub fn compute_shifts(genome: &Genome, s: u64, e: u64, n_genome_real: u64) -> (u8, u8) {
-    let forward = &genome.sequence[..n_genome_real as usize];
+    let forward = &genome.sequence.as_slice()[..n_genome_real as usize];
     let si = s as usize;
     let ei = e as usize;
 
@@ -448,7 +448,7 @@ pub fn build_gsj(
 ) -> Result<Vec<u8>, Error> {
     let overhang = sjdb_overhang as usize;
     let sjdb_length = 2 * overhang + 1;
-    let forward = &genome.sequence[..n_genome_real as usize];
+    let forward = &genome.sequence.as_slice()[..n_genome_real as usize];
     let mut gsj = vec![GSJ_SPACING; junctions.len() * sjdb_length];
 
     for (i, pj) in junctions.iter().enumerate() {
@@ -569,7 +569,8 @@ mod tests {
         let mut seq = forward;
         seq.extend(std::iter::repeat_n(5u8, n));
         Genome {
-            sequence: seq,
+            transform_blocks: None,
+            sequence: seq.into(),
             n_genome: n as u64,
             n_genome_real: n as u64,
             n_chr_real: 1,
@@ -974,7 +975,8 @@ mod tests {
         let mut seq = vec![5u8; 4000];
         seq[..2000].copy_from_slice(&vec![0u8; 2000]);
         let genome = Genome {
-            sequence: seq,
+            transform_blocks: None,
+            sequence: seq.into(),
             n_genome: 2000,
             n_genome_real: 2000,
             n_chr_real: 2,
@@ -1113,7 +1115,8 @@ mod tests {
         let mut seq = vec![5u8; 4000];
         seq[..2000].copy_from_slice(&vec![0u8; 2000]);
         let genome = Genome {
-            sequence: seq,
+            transform_blocks: None,
+            sequence: seq.into(),
             n_genome: 2000,
             n_genome_real: 2000,
             n_chr_real: 1,

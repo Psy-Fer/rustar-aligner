@@ -136,6 +136,11 @@ impl SamWriter {
         let rg_id_owned = params.primary_rg_id()?;
         let rg_id = rg_id_owned.as_deref();
 
+        let best_score = transcripts
+            .iter()
+            .map(|t| t.score)
+            .max()
+            .unwrap_or(i32::MIN);
         for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
             let mut record = transcript_to_record(
                 transcript,
@@ -146,9 +151,12 @@ impl SamWriter {
                 mapq,
                 max_output,    // NH = number of reported alignments
                 hit_index + 1, // 1-based
+                params.out_sam_attr_ih_start,
                 attrs,
             )?;
             maybe_insert_rg_tag(&mut record, rg_id);
+            apply_sam_flag_or_and(&mut record, params);
+            apply_primary_flag(&mut record, transcript.score, best_score, params);
 
             self.writer.write_alignment_record(&self.header, &record)?;
         }
@@ -261,6 +269,11 @@ impl SamWriter {
         let rg_id = rg_id_owned.as_deref();
 
         let mut records = Vec::with_capacity(max_output);
+        let best_score = transcripts
+            .iter()
+            .map(|t| t.score)
+            .max()
+            .unwrap_or(i32::MIN);
         for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
             let mut record = transcript_to_record(
                 transcript,
@@ -271,9 +284,12 @@ impl SamWriter {
                 mapq,
                 max_output,    // NH = number of reported alignments
                 hit_index + 1, // 1-based
+                params.out_sam_attr_ih_start,
                 attrs,
             )?;
             maybe_insert_rg_tag(&mut record, rg_id);
+            apply_sam_flag_or_and(&mut record, params);
+            apply_primary_flag(&mut record, transcript.score, best_score, params);
             records.push(record);
         }
 
@@ -331,6 +347,11 @@ impl SamWriter {
         let rg_id = rg_id_owned.as_deref();
 
         let mut records = Vec::with_capacity(max_output * 2);
+        let best_score = paired_alignments
+            .iter()
+            .map(|p| p.combined_wt_score)
+            .max()
+            .unwrap_or(i32::MIN);
 
         for (pair_idx, paired_aln) in paired_alignments.iter().take(max_output).enumerate() {
             let hit_index = pair_idx + 1; // 1-based
@@ -349,13 +370,22 @@ impl SamWriter {
                 mapq,
                 true, // is_first_mate
                 paired_aln.is_proper_pair,
-                paired_aln.insert_size,
+                paired_tlen(
+                    &paired_aln.mate1_transcript,
+                    &paired_aln.mate2_transcript,
+                    true,
+                    paired_aln.insert_size,
+                    params,
+                ),
                 max_output, // NH = number of reported alignments
                 hit_index,
+                params.out_sam_attr_ih_start,
                 combined_score,
                 attrs,
             )?;
             maybe_insert_rg_tag(&mut rec1, rg_id);
+            apply_sam_flag_or_and(&mut rec1, params);
+            apply_primary_flag(&mut rec1, combined_score, best_score, params);
             records.push(rec1);
 
             // Create record for mate2 (this=mate2, mate=mate1)
@@ -369,13 +399,22 @@ impl SamWriter {
                 mapq,
                 false, // is_first_mate
                 paired_aln.is_proper_pair,
-                -paired_aln.insert_size, // Negative for mate2
-                max_output,              // NH = number of reported alignments
+                paired_tlen(
+                    &paired_aln.mate1_transcript,
+                    &paired_aln.mate2_transcript,
+                    false,
+                    -paired_aln.insert_size, // Negative for mate2 (mode 1 default)
+                    params,
+                ),
+                max_output, // NH = number of reported alignments
                 hit_index,
+                params.out_sam_attr_ih_start,
                 combined_score,
                 attrs,
             )?;
             maybe_insert_rg_tag(&mut rec2, rg_id);
+            apply_sam_flag_or_and(&mut rec2, params);
+            apply_primary_flag(&mut rec2, combined_score, best_score, params);
             records.push(rec2);
         }
 
@@ -481,7 +520,10 @@ impl SamWriter {
             data.insert(Tag::ALIGNMENT_HIT_COUNT, Value::from(n_alignments as i32));
         }
         if attrs.contains(SamAttributes::HI) {
-            data.insert(Tag::HIT_INDEX, Value::from(1i32));
+            data.insert(
+                Tag::HIT_INDEX,
+                Value::from(params.out_sam_attr_ih_start as i32),
+            );
         }
         if attrs.contains(SamAttributes::AS) {
             data.insert(Tag::ALIGNMENT_SCORE, Value::from(mapped_transcript.score));
@@ -524,6 +566,7 @@ impl SamWriter {
             data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
         }
         maybe_insert_rg_tag(&mut mapped_rec, rg_id);
+        apply_sam_flag_or_and(&mut mapped_rec, params);
 
         // --- Build unmapped mate record ---
         let mut unmapped_rec = RecordBuf::default();
@@ -677,8 +720,12 @@ impl SamWriter {
                 data.insert(Tag::ALIGNMENT_HIT_COUNT, Value::from(n_alignments as i32));
             }
             if attrs.contains(SamAttributes::HI) {
-                // HI is 1-based; primary = 1, secondaries > 1 in emission order.
-                data.insert(Tag::HIT_INDEX, Value::from((hit_idx + 1) as i32));
+                // HI defaults to 1-based (primary = 1, secondaries > 1 in emission order);
+                // `--outSAMattrIHstart` shifts the whole sequence (0 = CellRanger convention).
+                data.insert(
+                    Tag::HIT_INDEX,
+                    Value::from(hit_idx as i32 + params.out_sam_attr_ih_start as i32),
+                );
             }
             if attrs.contains(SamAttributes::AS) {
                 data.insert(Tag::ALIGNMENT_SCORE, Value::from(t.score));
@@ -915,6 +962,68 @@ fn maybe_insert_rg_tag(record: &mut RecordBuf, rg_id: Option<&str>) {
     }
 }
 
+/// Add STARsolo GX/GN gene tags to each record for the read's `Gene`-feature
+/// assignment. `gx`/`gn` are the gene_id / gene_name, or `"-"` when the read is
+/// not uniquely assigned to a gene (STARsolo convention). No-ops unless the
+/// corresponding attribute bit is set in `--outSAMattributes`.
+pub fn add_gene_tags(records: &mut [RecordBuf], gx: &str, gn: &str, attrs: SamAttributes) {
+    for rec in records.iter_mut() {
+        if attrs.contains(SamAttributes::GX) {
+            rec.data_mut()
+                .insert(Tag::new(b'G', b'X'), Value::String(BString::from(gx)));
+        }
+        if attrs.contains(SamAttributes::GN) {
+            rec.data_mut()
+                .insert(Tag::new(b'G', b'N'), Value::String(BString::from(gn)));
+        }
+    }
+}
+
+/// Apply `--outSAMflagOR` / `--outSAMflagAND` to a mapped record's FLAG:
+/// `(FLAG & flagAND) | flagOR`. Matches STAR/STAR-rs, which apply this only to
+/// mapped-mate records; unmapped and transcriptome-BAM records are untouched.
+fn apply_sam_flag_or_and(record: &mut RecordBuf, params: &Parameters) {
+    let or_bits = params.out_sam_flag_or as u16;
+    let and_bits = params.out_sam_flag_and.min(u16::MAX as u32) as u16;
+    let bits = u16::from(record.flags());
+    *record.flags_mut() = sam::alignment::record::Flags::from((bits & and_bits) | or_bits);
+}
+
+/// `--outSAMprimaryFlag AllBestScore`: clear the SECONDARY bit on every alignment tied for the
+/// best score, instead of only the single (already-sorted) best alignment (`OneBestScore`,
+/// the default, which the caller's existing hit-index-based SECONDARY assignment already gives).
+fn apply_primary_flag(record: &mut RecordBuf, score: i32, best_score: i32, params: &Parameters) {
+    if params.out_sam_primary_flag == crate::params::OutSamPrimaryFlag::AllBestScore
+        && score == best_score
+    {
+        let mut flags = record.flags();
+        flags.remove(sam::alignment::record::Flags::SECONDARY);
+        *record.flags_mut() = flags;
+    }
+}
+
+/// `--outSAMtlen 2`: per-mate span, signed by whichever mate is genomically leftmost (ties go to
+/// mate1). Differs from the default (mode 1, `default_signed`) only for contained/dovetailed
+/// pairs, where mode 1's whole-combined-transcript span and mode 2's per-mate max/min span
+/// diverge.
+fn paired_tlen(
+    mate1: &Transcript,
+    mate2: &Transcript,
+    is_first_mate: bool,
+    default_signed: i32,
+    params: &Parameters,
+) -> i32 {
+    if params.out_sam_tlen != 2 {
+        return default_signed;
+    }
+    let span = (mate1.genome_end.max(mate2.genome_end) - mate1.genome_start.min(mate2.genome_start))
+        as i64;
+    let mate1_is_leftmost = mate1.genome_start <= mate2.genome_start;
+    let this_is_leftmost = mate1_is_leftmost == is_first_mate;
+    let span = span as i32;
+    if this_is_leftmost { span } else { -span }
+}
+
 /// Convert FASTQ ASCII quality bytes (Phred+33) to raw Phred values (0-93) for
 /// the BAM binary QUAL field, per SAM spec §4.2.3.
 ///
@@ -934,6 +1043,7 @@ fn transcript_to_record(
     mapq: u8,
     n_alignments: usize,
     hit_index: usize,
+    ih_start: u32,
     attrs: SamAttributes,
 ) -> Result<RecordBuf, Error> {
     let mut record = RecordBuf::default();
@@ -1004,7 +1114,10 @@ fn transcript_to_record(
         data.insert(Tag::ALIGNMENT_HIT_COUNT, Value::from(n_alignments as i32));
     }
     if attrs.contains(SamAttributes::HI) {
-        data.insert(Tag::HIT_INDEX, Value::from(hit_index as i32));
+        data.insert(
+            Tag::HIT_INDEX,
+            Value::from(hit_index as i32 - 1 + ih_start as i32),
+        );
     }
     if attrs.contains(SamAttributes::AS) {
         data.insert(Tag::ALIGNMENT_SCORE, Value::from(transcript.score));
@@ -1255,6 +1368,7 @@ fn build_paired_mate_record(
     insert_size: i32,
     n_alignments: usize,
     hit_index: usize,
+    ih_start: u32,
     combined_score: i32,
     attrs: SamAttributes,
 ) -> Result<RecordBuf, Error> {
@@ -1355,7 +1469,10 @@ fn build_paired_mate_record(
         data.insert(Tag::ALIGNMENT_HIT_COUNT, Value::from(n_alignments as i32));
     }
     if attrs.contains(SamAttributes::HI) {
-        data.insert(Tag::HIT_INDEX, Value::from(hit_index as i32));
+        data.insert(
+            Tag::HIT_INDEX,
+            Value::from(hit_index as i32 - 1 + ih_start as i32),
+        );
     }
     if attrs.contains(SamAttributes::AS) {
         // STAR reports combined score (sum of both mates) for PE AS tag
@@ -1404,7 +1521,8 @@ mod tests {
 
     fn make_test_genome() -> Genome {
         Genome {
-            sequence: vec![0, 1, 2, 3, 0, 1, 2, 3], // ACGTACGT
+            transform_blocks: None,
+            sequence: vec![0, 1, 2, 3, 0, 1, 2, 3].into(), // ACGTACGT
             n_genome: 8,
             n_genome_real: 8,
             n_chr_real: 1,
@@ -1720,6 +1838,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             SamAttributes::STANDARD,
         );
         assert!(record.is_ok());
@@ -1957,6 +2076,7 @@ mod tests {
             300,
             1,   // n_alignments
             1,   // hit_index
+            1,   // ih_start
             190, // combined_score (100+90)
             SamAttributes::STANDARD,
         )
@@ -1985,6 +2105,7 @@ mod tests {
             -300,
             1,   // n_alignments
             1,   // hit_index
+            1,   // ih_start
             190, // combined_score (100+90)
             SamAttributes::STANDARD,
         )
@@ -2069,6 +2190,7 @@ mod tests {
             250,
             1,   // n_alignments
             1,   // hit_index
+            1,   // ih_start
             350, // combined_score (200+150)
             SamAttributes::STANDARD,
         )
@@ -2279,6 +2401,7 @@ mod tests {
             255,
             3, // n_alignments
             2, // hit_index
+            1, // ih_start
             SamAttributes::STANDARD,
         )
         .unwrap();
@@ -2396,6 +2519,7 @@ mod tests {
             255,
             1, // unique mapper
             1,
+            1, // ih_start
             SamAttributes::STANDARD,
         )
         .unwrap();
@@ -2493,6 +2617,241 @@ mod tests {
     }
 
     #[test]
+    fn test_out_sam_flag_or_and_applied_to_mapped_record() {
+        use cigar::op::{Kind, Op};
+        let genome = make_test_genome();
+        // OR in 0x200 (QC-fail); AND out 0x10 (reverse) via 65535 & !16 = 65519.
+        let params = Parameters::parse_from([
+            "rustar-aligner",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMflagOR",
+            "512",
+            "--outSAMflagAND",
+            "65519",
+        ]);
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 50,
+            is_reverse: true,
+            exons: vec![],
+            cigar: vec![Op::new(Kind::Match, 50)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 4],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let records = SamWriter::build_alignment_records(
+            "read1",
+            &read_seq,
+            &read_qual,
+            std::slice::from_ref(&transcript),
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        // REVERSE_COMPLEMENTED (0x10) was set by the transcript but AND-ed out;
+        // QC_FAIL (0x200) was OR-ed in.
+        assert!(!records[0].flags().is_reverse_complemented());
+        assert!(records[0].flags().is_qc_fail());
+    }
+
+    #[test]
+    fn test_out_sam_primary_flag_all_best_score() {
+        use cigar::op::{Kind, Op};
+        let genome = make_test_genome();
+        let params = Parameters::parse_from([
+            "rustar-aligner",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMprimaryFlag",
+            "AllBestScore",
+        ]);
+
+        let mk = |genome_start: u64, score: i32| Transcript {
+            chr_idx: 0,
+            genome_start,
+            genome_end: genome_start + 50,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![Op::new(Kind::Match, 50)],
+            score,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 4],
+        };
+        // Two alignments tied for the best score (100), one strictly worse (98).
+        let transcripts = vec![mk(0, 100), mk(2, 98), mk(4, 100)];
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let records = SamWriter::build_alignment_records(
+            "read1",
+            &read_seq,
+            &read_qual,
+            &transcripts,
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert!(!records[0].flags().is_secondary(), "best-score #1 primary");
+        assert!(
+            records[1].flags().is_secondary(),
+            "worse-score stays secondary"
+        );
+        assert!(
+            !records[2].flags().is_secondary(),
+            "best-score #2 also primary"
+        );
+    }
+
+    #[test]
+    fn test_out_sam_attr_ih_start_shifts_hi_tag() {
+        use cigar::op::{Kind, Op};
+        let genome = make_test_genome();
+        let params = Parameters::parse_from([
+            "rustar-aligner",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMattrIHstart",
+            "0",
+        ]);
+
+        let transcripts = vec![
+            Transcript {
+                chr_idx: 0,
+                genome_start: 0,
+                genome_end: 50,
+                is_reverse: false,
+                exons: vec![],
+                cigar: vec![Op::new(Kind::Match, 50)],
+                score: 100,
+                n_mismatch: 0,
+                n_gap: 0,
+                n_junction: 0,
+                junction_motifs: vec![],
+                junction_annotated: vec![],
+                read_seq: vec![0; 4],
+            },
+            Transcript {
+                chr_idx: 0,
+                genome_start: 2,
+                genome_end: 52,
+                is_reverse: false,
+                exons: vec![],
+                cigar: vec![Op::new(Kind::Match, 50)],
+                score: 98,
+                n_mismatch: 1,
+                n_gap: 0,
+                n_junction: 0,
+                junction_motifs: vec![],
+                junction_annotated: vec![],
+                read_seq: vec![0; 4],
+            },
+        ];
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let records = SamWriter::build_alignment_records(
+            "read1",
+            &read_seq,
+            &read_qual,
+            &transcripts,
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 2);
+        // --outSAMattrIHstart 0: HI starts at 0 instead of the STAR default 1.
+        assert_eq!(
+            records[0].data().get(&Tag::HIT_INDEX),
+            Some(&Value::from(0_i32))
+        );
+        assert_eq!(
+            records[1].data().get(&Tag::HIT_INDEX),
+            Some(&Value::from(1_i32))
+        );
+        // The secondary FLAG bit is unaffected by IHstart (still rank-based, not tag-value-based).
+        assert!(!records[0].flags().is_secondary());
+        assert!(records[1].flags().is_secondary());
+    }
+
+    #[test]
+    fn test_out_sam_tlen_mode2_contained_pair() {
+        use cigar::op::{Kind, Op};
+        // mate2 fully contained within mate1's span: [100,200) vs [120,180).
+        // Mode 1 (default) just returns whatever the caller already computed (opaque here).
+        // Mode 2 uses the per-mate max/min span (100) and signs by genomic leftmost (mate1).
+        let mate1 = Transcript {
+            chr_idx: 0,
+            genome_start: 100,
+            genome_end: 200,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![Op::new(Kind::Match, 100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 4],
+        };
+        let mate2 = Transcript {
+            genome_start: 120,
+            genome_end: 180,
+            ..mate1.clone()
+        };
+
+        let params_mode1 = Parameters::parse_from(["rustar-aligner", "--readFilesIn", "test.fq"]);
+        assert_eq!(
+            paired_tlen(&mate1, &mate2, true, 42, &params_mode1),
+            42,
+            "mode 1 (default) passes the caller-computed value through unchanged"
+        );
+
+        let params_mode2 = Parameters::parse_from([
+            "rustar-aligner",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMtlen",
+            "2",
+        ]);
+        assert_eq!(
+            paired_tlen(&mate1, &mate2, true, 42, &params_mode2),
+            100,
+            "mate1 is leftmost -> positive per-mate span"
+        );
+        assert_eq!(
+            paired_tlen(&mate1, &mate2, false, -42, &params_mode2),
+            -100,
+            "mate2 is not leftmost -> negative per-mate span"
+        );
+    }
+
+    #[test]
     fn test_xs_tag_spliced() {
         use cigar::op::{Kind, Op};
         let genome = make_test_genome();
@@ -2529,6 +2888,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             SamAttributes::ALL,
         )
         .unwrap();
@@ -2574,6 +2934,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             SamAttributes::ALL,
         )
         .unwrap();
@@ -2623,6 +2984,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             SamAttributes::ALL,
         )
         .unwrap();
@@ -2674,6 +3036,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             SamAttributes::ALL,
         )
         .unwrap();
@@ -2723,6 +3086,7 @@ mod tests {
             255,
             1,
             1,
+            1,                       // ih_start
             SamAttributes::STANDARD, // XS not in standard attrs
         )
         .unwrap();
@@ -3157,6 +3521,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             SamAttributes::ALL,
         )
         .unwrap();
@@ -3242,6 +3607,7 @@ mod tests {
             7,
             1,
             1,
+            1,   // ih_start
             190, // combined_score (100+90)
             SamAttributes::STANDARD,
         )
@@ -3265,6 +3631,7 @@ mod tests {
             -7,
             1,
             1,
+            1,   // ih_start
             190, // combined_score (100+90)
             SamAttributes::STANDARD,
         )
@@ -3351,6 +3718,7 @@ mod tests {
             7,
             1,
             1,
+            1,   // ih_start
             180, // combined_score (100+80)
             SamAttributes::STANDARD,
         )
@@ -3381,6 +3749,7 @@ mod tests {
             -7,
             1,
             1,
+            1,   // ih_start
             180, // combined_score (100+80)
             SamAttributes::STANDARD,
         )
@@ -3467,6 +3836,7 @@ mod tests {
             7,
             1,
             1,
+            1,   // ih_start
             190, // combined_score (100+90)
             SamAttributes::STANDARD,
         )
@@ -3487,6 +3857,7 @@ mod tests {
             -7,
             1,
             1,
+            1,   // ih_start
             190, // combined_score (100+90)
             SamAttributes::STANDARD,
         )
@@ -3529,6 +3900,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             SamAttributes::STANDARD,
         )
         .unwrap();
@@ -3606,6 +3978,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             empty_attrs,
         )
         .unwrap();
@@ -3681,6 +4054,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             attrs,
         )
         .unwrap();
@@ -3820,6 +4194,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             SamAttributes::ALL,
         )
         .unwrap();
@@ -3876,6 +4251,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             attrs,
         )
         .unwrap();
@@ -3902,6 +4278,7 @@ mod tests {
             255,
             1,
             1,
+            1, // ih_start
             no_nm,
         )
         .unwrap();

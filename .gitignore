@@ -37,3 +37,12 @@ target
 *.log
 *.tab
 *.sam
+
+# Linux build dir used by the solo Docker benchmark/diff (CARGO_TARGET_DIR)
+/target-linux/
+
+# amd64 Linux build dir for the benchmark container
+/target-amd64/
+
+# macOS Finder metadata
+.DS_Store

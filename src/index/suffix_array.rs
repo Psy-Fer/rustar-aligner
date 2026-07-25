@@ -40,6 +40,12 @@ impl SuffixArray {
         crate::index::sa_build::build(genome)
     }
 
+    /// Build the suffix array with STAR's `--genomeSAsparseD` stride (see
+    /// [`crate::index::sa_build::build_sparse`]). `sparse_d == 1` is the dense SA.
+    pub fn build_sparse(genome: &Genome, sparse_d: u64) -> Result<Self, Error> {
+        crate::index::sa_build::build_sparse(genome, sparse_d)
+    }
+
     /// Get the number of suffixes in the array.
     pub fn len(&self) -> usize {
         self.data.len()
@@ -61,6 +67,14 @@ impl SuffixArray {
     pub fn get(&self, index: usize) -> u64 {
         self.data.read(index)
     }
+
+    /// Software-prefetch the SA entry at `index` (hint only; see
+    /// [`crate::index::packed_array::PackedArray::prefetch`]). Used to overlap the
+    /// random SA loads of the binary search with the current probe's genome compare.
+    #[inline]
+    pub fn prefetch(&self, index: usize) {
+        self.data.prefetch(index);
+    }
 }
 
 /// Compare two suffixes for sorting using STAR's exact comparison logic.
@@ -80,7 +94,7 @@ fn compare_suffixes(
     use std::cmp::Ordering;
 
     let n_genome = genome.n_genome as usize;
-    let sequence = &genome.sequence;
+    let sequence = genome.sequence.as_slice();
 
     // Adjust positions for reverse complement
     let start_a = if reverse_a { pos_a + n_genome } else { pos_a };
@@ -184,12 +198,12 @@ mod tests {
 
         let mut suffixes: Vec<(u64, bool)> = Vec::new();
         for i in 0..n_genome {
-            if genome.sequence[i] < 4 {
+            if genome.sequence.base(i) < 4 {
                 suffixes.push((i as u64, false));
             }
         }
         for i in n_genome..(2 * n_genome) {
-            if genome.sequence[i] < 4 {
+            if genome.sequence.base(i) < 4 {
                 suffixes.push(((i - n_genome) as u64, true));
             }
         }
@@ -272,7 +286,7 @@ mod tests {
         // The lexicographically first suffix should start with the smallest base
         let first_entry = sa.get(0);
         let (first_pos, _) = sa.decode(first_entry);
-        let first_base = genome.sequence[first_pos as usize];
+        let first_base = genome.sequence.base(first_pos as usize);
 
         // In "AAB", the first suffix lexicographically is "A" (from pos 0 or 1)
         assert_eq!(first_base, 0); // A

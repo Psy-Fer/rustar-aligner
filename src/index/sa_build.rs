@@ -177,6 +177,14 @@ impl SaSymbol for u16 {
 /// + reverse complement laid out as `[forward | RC]`). The current call site
 ///   (`GenomeIndex::build` after `genome.append_sjdb`) already satisfies this.
 pub fn build(genome: &Genome) -> Result<SuffixArray, Error> {
+    build_sparse(genome, 1)
+}
+
+/// Like [`build`] but with STAR's `--genomeSAsparseD` stride: only every
+/// `sparse_d`-th position (over the doubled fwd+RC coordinate) is stored,
+/// shrinking the SA ~`sparse_d`× at the cost of seed sensitivity. `sparse_d == 1`
+/// is the dense SA.
+pub fn build_sparse(genome: &Genome, sparse_d: u64) -> Result<SuffixArray, Error> {
     // Production entry: read the `RUSTAR_USE_SENTINEL_TRANSFORM` env
     // var once and delegate. Tests should call [`build_impl`] directly
     // to avoid racing on the env var with parallel tests.
@@ -186,7 +194,7 @@ pub fn build(genome: &Genome) -> Result<SuffixArray, Error> {
             .as_deref(),
         Some("1" | "true" | "yes" | "on")
     );
-    build_impl(genome, force_sentinel)
+    build_impl(genome, force_sentinel, sparse_d)
 }
 
 /// Inner build that takes `force_sentinel` as an explicit argument
@@ -199,7 +207,12 @@ pub fn build(genome: &Genome) -> Result<SuffixArray, Error> {
 /// `u16`), the corresponding sentinel-transform arm is used.
 /// Otherwise the segmented arm (the default since
 /// caps-sa 0.4.1) is used.
-pub(crate) fn build_impl(genome: &Genome, force_sentinel: bool) -> Result<SuffixArray, Error> {
+pub(crate) fn build_impl(
+    genome: &Genome,
+    force_sentinel: bool,
+    sparse_d: u64,
+) -> Result<SuffixArray, Error> {
+    assert!(sparse_d >= 1, "sparse_d must be >= 1");
     let gstrand_bit = SuffixArray::calculate_gstrand_bit(genome.n_genome);
     let gstrand_mask = (1u64 << gstrand_bit) - 1;
     let word_length = gstrand_bit + 1;
@@ -212,10 +225,18 @@ pub(crate) fn build_impl(genome: &Genome, force_sentinel: bool) -> Result<Suffix
     //     we count here.
     let n_genome = genome.n_genome as usize;
     let n2 = 2 * n_genome;
-    let n_sa_kept: usize = genome.sequence[..n2.min(genome.sequence.len())]
-        .par_iter()
-        .filter(|&&b| b < 4)
-        .count();
+    let slice = &genome.sequence.as_slice()[..n2.min(genome.sequence.len())];
+    // Match the sparse keep-rule used by `build_streaming_impl` so the
+    // pre-sized `PackedArray` length equals the number of emitted entries.
+    let n_sa_kept: usize = if sparse_d == 1 {
+        slice.par_iter().filter(|&&b| b < 4).count()
+    } else {
+        slice
+            .par_iter()
+            .enumerate()
+            .filter(|&(i, &b)| b < 4 && (i as u64).is_multiple_of(sparse_d))
+            .count()
+    };
 
     let mut data = PackedArray::new(word_length, n_sa_kept);
     let mut out_idx: usize = 0;
@@ -224,7 +245,7 @@ pub(crate) fn build_impl(genome: &Genome, force_sentinel: bool) -> Result<Suffix
     // exactly the path used by tests and by any non-streaming
     // caller; production [`genomeGenerate`] uses
     // [`build_streaming`] directly and bypasses this allocation.
-    build_streaming_impl(genome, force_sentinel, None, |packed_value| {
+    build_streaming_impl(genome, force_sentinel, None, sparse_d, |packed_value| {
         data.write(out_idx, packed_value);
         out_idx += 1;
         Ok(())
@@ -253,6 +274,7 @@ pub(crate) fn build_impl(genome: &Genome, force_sentinel: bool) -> Result<Suffix
 pub fn build_streaming<F>(
     genome: &Genome,
     temp_dir: Option<&Path>,
+    sparse_d: u64,
     emit: F,
 ) -> Result<(u32, u64, usize), Error>
 where
@@ -266,7 +288,7 @@ where
     );
     let gstrand_bit = SuffixArray::calculate_gstrand_bit(genome.n_genome);
     let gstrand_mask = (1u64 << gstrand_bit) - 1;
-    let n_kept = build_streaming_impl(genome, force_sentinel, temp_dir, emit)?;
+    let n_kept = build_streaming_impl(genome, force_sentinel, temp_dir, sparse_d, emit)?;
     Ok((gstrand_bit, gstrand_mask, n_kept))
 }
 
@@ -279,11 +301,13 @@ pub(crate) fn build_streaming_impl<F>(
     genome: &Genome,
     force_sentinel: bool,
     temp_dir: Option<&Path>,
+    sparse_d: u64,
     mut emit: F,
 ) -> Result<usize, Error>
 where
     F: FnMut(u64) -> Result<(), Error>,
 {
+    assert!(sparse_d >= 1, "sparse_d must be >= 1");
     let n_genome = genome.n_genome as usize;
     let n2 = 2 * n_genome;
     if genome.sequence.len() < n2 {
@@ -300,7 +324,7 @@ where
     // (1) Count spacer runs so we can pick the narrowest alphabet
     //     width that fits. The build itself is a separate pass through
     //     the genome that emits the typed `Vec<S>` for the chosen S.
-    let n_seg = count_spacer_runs(&genome.sequence[..n2]);
+    let n_seg = count_spacer_runs(&genome.sequence.as_slice()[..n2]);
     let alphabet_max = SENTINEL_BASE as u32 + n_seg;
     log::info!("sa_build: counted {n_seg} per-segment sentinels (alphabet max = {alphabet_max})");
 
@@ -312,12 +336,25 @@ where
     //     On the human genome that's ~770 MB total vs the 47 GB
     //     `Vec<u64>` the previous `_for_positions` path required
     //     (~60× reduction).
-    let sparse_d: u64 = 1;
-    debug_assert_eq!(
-        sparse_d, 1,
-        "non-default sparse_d isn't wired through this path"
-    );
-    let n_sa_kept: usize = genome.sequence[..n2].par_iter().filter(|&&b| b < 4).count();
+    // STAR's sparse rule (`Genome_genomeGenerate.cpp`:
+    //   `for (ii=0; ii<2*nGenome; ii+=gSAsparseD) if (G[ii]<4) keep;`)
+    // keeps every `sparse_d`-th position across the DOUBLED (fwd+RC)
+    // coordinate `ii`, which is exactly `orig_pos` below. For `sparse_d == 1`
+    // this reduces to the plain ACGT filter (dense SA). Sparse SA is lossy —
+    // it stores fewer suffixes, so `sparse_d > 1` finds fewer seeds and can
+    // change alignments (matching STAR-at-the-same-`sparse_d`, not `D=1`).
+    let n_sa_kept: usize = if sparse_d == 1 {
+        genome.sequence.as_slice()[..n2]
+            .par_iter()
+            .filter(|&&b| b < 4)
+            .count()
+    } else {
+        genome.sequence.as_slice()[..n2]
+            .par_iter()
+            .enumerate()
+            .filter(|&(i, &b)| b < 4 && (i as u64).is_multiple_of(sparse_d))
+            .count()
+    };
     log::info!("sa_build: {n_sa_kept} entries after ACGT + sparse-d={sparse_d} filter");
 
     let n_genome_u64 = n_genome as u64;
@@ -332,7 +369,19 @@ where
     // `try_*` APIs propagate this callback error immediately, so
     // SA-file write failures abort the build instead of running to
     // completion and reporting afterwards.
+    let two_n_minus_1 = 2 * n_genome_u64 - 1;
     let mut pack_one = |orig_pos: u64| -> Result<(), Error> {
+        // Sparse SA: keep only every `sparse_d`-th suffix by STAR's *start*
+        // coordinate `ii` (`Genome_genomeGenerate.cpp:184` strides `ii`, keeping
+        // `ii % gSAsparseD == 0`). STAR then stores the MIRRORED position
+        // `w = 2*nGenome-1-ii` (line 281), which is exactly the `orig_pos` handed
+        // here — so the stride test must invert the mirror: `ii = 2*nGenome-1-w`.
+        // Filtering `orig_pos` directly would keep the wrong parity. caps-sa still
+        // visits every sorted ACGT suffix; dropping off-stride ones preserves the
+        // sorted order of the kept subset. (No-op when sparse_d == 1.)
+        if sparse_d > 1 && !(two_n_minus_1 - orig_pos).is_multiple_of(sparse_d) {
+            return Ok(());
+        }
         let packed_value = if (orig_pos as usize) < n_genome {
             orig_pos
         } else {
@@ -364,15 +413,27 @@ where
             "sa_build: RUSTAR_USE_SENTINEL_TRANSFORM=1, alphabet fits u8 — \
              using sentinel-transform arm"
         );
-        let t_prime: Vec<u8> = build_sentinel_transformed_text(&genome.sequence[..n2], n_seg);
-        dispatch_caps_sa(t_prime, &genome.sequence[..n2], temp_dir, &mut pack_one)?;
+        let t_prime: Vec<u8> =
+            build_sentinel_transformed_text(&genome.sequence.as_slice()[..n2], n_seg);
+        dispatch_caps_sa(
+            t_prime,
+            &genome.sequence.as_slice()[..n2],
+            temp_dir,
+            &mut pack_one,
+        )?;
     } else if force_sentinel && alphabet_max <= <u16 as SaSymbol>::MAX_REPRESENTABLE {
         log::info!(
             "sa_build: RUSTAR_USE_SENTINEL_TRANSFORM=1, alphabet fits u16 — \
              using sentinel-transform arm"
         );
-        let t_prime: Vec<u16> = build_sentinel_transformed_text(&genome.sequence[..n2], n_seg);
-        dispatch_caps_sa(t_prime, &genome.sequence[..n2], temp_dir, &mut pack_one)?;
+        let t_prime: Vec<u16> =
+            build_sentinel_transformed_text(&genome.sequence.as_slice()[..n2], n_seg);
+        dispatch_caps_sa(
+            t_prime,
+            &genome.sequence.as_slice()[..n2],
+            temp_dir,
+            &mut pack_one,
+        )?;
     } else {
         if force_sentinel {
             log::warn!(
@@ -387,7 +448,7 @@ where
                  alphabet_max={alphabet_max}, {n_seg} segments)"
             );
         }
-        dispatch_caps_sa_segmented(&genome.sequence[..n2], temp_dir, &mut pack_one)?;
+        dispatch_caps_sa_segmented(&genome.sequence.as_slice()[..n2], temp_dir, &mut pack_one)?;
     }
 
     debug_assert_eq!(
@@ -976,9 +1037,9 @@ mod tests {
     fn assert_arms_byte_identical(label: &str, fasta: &str, bin_nbits: u32) {
         let genome = build_genome_from_fasta(fasta, bin_nbits);
         // Default (segmented) arm — the new production path.
-        let sa_segmented = build_impl(&genome, false).unwrap();
+        let sa_segmented = build_impl(&genome, false, 1).unwrap();
         // Sentinel-transform fallback — the legacy STAR-faithful path.
-        let sa_sentinel = build_impl(&genome, true).unwrap();
+        let sa_sentinel = build_impl(&genome, true, 1).unwrap();
         assert_eq!(
             sa_segmented.data.data(),
             sa_sentinel.data.data(),
@@ -992,11 +1053,62 @@ mod tests {
     /// values are written through [`PackedStreamWriter`]. Drives both
     /// over a small multi-chromosome fixture and compares the byte
     /// output of each.
+    /// STAR's sparse SA (`--genomeSAsparseD D`) keeps every Dth position of
+    /// the doubled (fwd+RC) coordinate. Since sparsity only *drops* entries
+    /// and never reorders them, the sparse-D SA must equal the dense (D=1) SA
+    /// filtered to entries whose doubled-coordinate position is ≡ 0 (mod D),
+    /// in the same order. This is checkable without STAR and pins the
+    /// construction rule (`Genome_genomeGenerate.cpp:184`).
+    #[test]
+    fn sparse_sa_is_dense_filtered_by_stride() {
+        let genome =
+            build_genome_from_fasta(">chrA\nACGTACGTACGTACGT\n>chrB\nGGGGCCCCAAAATTTT\n", 4);
+        let n_genome = genome.n_genome;
+        let dense = build_sparse(&genome, 1).unwrap();
+
+        for d in [2u64, 3, 4] {
+            let sparse = build_sparse(&genome, d).unwrap();
+
+            // Reconstruct each dense entry's STORED (mirrored) position
+            // `w = 2*nGenome-1-ii` (fwd: pos; rev: pos + n_genome), invert the
+            // mirror to STAR's suffix-start `ii`, and keep the `ii ≡ 0 (mod d)`
+            // ones — the exact rule `build_streaming_impl` applies.
+            let expected: Vec<u64> = (0..dense.len())
+                .map(|i| dense.get(i))
+                .filter(|&v| {
+                    let (pos, is_rev) = dense.decode(v);
+                    let w = if is_rev { pos + n_genome } else { pos };
+                    let ii = 2 * n_genome - 1 - w;
+                    ii.is_multiple_of(d)
+                })
+                .collect();
+
+            let got: Vec<u64> = (0..sparse.len()).map(|i| sparse.get(i)).collect();
+
+            assert_eq!(
+                got.len(),
+                expected.len(),
+                "sparse d={d}: entry count {} != dense-filtered {}",
+                got.len(),
+                expected.len()
+            );
+            assert_eq!(
+                got, expected,
+                "sparse d={d} SA is not the dense SA filtered by stride"
+            );
+            // Sanity: the sparse SA is meaningfully smaller.
+            assert!(
+                sparse.len() <= dense.len(),
+                "sparse d={d} SA larger than dense"
+            );
+        }
+    }
+
     #[test]
     fn streaming_build_matches_in_memory_build() {
         let genome =
             build_genome_from_fasta(">chrA\nACGTACGTAC\n>chrB\nGGGGCCCC\n>chrC\nNNACGTNN\n", 4);
-        let in_mem = build_impl(&genome, false).unwrap();
+        let in_mem = build_impl(&genome, false, 1).unwrap();
 
         // Streaming: collect packed values into the same byte layout
         // a `PackedArray` would have, via [`PackedStreamWriter`].
@@ -1004,7 +1116,7 @@ mod tests {
         let word_length = in_mem.data.word_length();
         let mut got: Vec<u8> = Vec::new();
         let mut writer = PackedStreamWriter::new(&mut got, word_length);
-        let (gbit, gmask, n) = super::build_streaming(&genome, None, |pv| {
+        let (gbit, gmask, n) = super::build_streaming(&genome, None, 1, |pv| {
             writer.write_one(pv).unwrap();
             Ok(())
         })

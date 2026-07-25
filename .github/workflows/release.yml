@@ -90,33 +90,49 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux targets are built with profile-guided optimization (`pgo:
+          # true`): a fresh synthetic genome+reads fixture (scripts/../
+          # src/bin/gen_pgo_fixture.rs) trains an instrumented build, which is
+          # then rebuilt using that profile. ~10-20% faster alignment in
+          # practice (see docs-old perf notes), output-identical to a plain
+          # build. Restricted to Linux because these are the only matrix
+          # entries that run NATIVELY on their own build runner — PGO needs to
+          # execute the instrumented binary to collect a profile, which is not
+          # possible for the cross-compiled targets below (e.g. macOS x86_64
+          # built on an Apple Silicon runner).
+
           # Linux x86_64 (baseline)
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            pgo: true
 
           # Linux x86_64 with AVX2 (x86-64-v3)
           - name: linux-x86_64-v3
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             target_cpu: x86-64-v3
+            pgo: true
 
           # Linux x86_64 with AVX-512 (x86-64-v4)
           - name: linux-x86_64-v4
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             target_cpu: x86-64-v4
+            pgo: true
 
           # Linux aarch64 (native arm64 runner, baseline)
           - name: linux-aarch64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            pgo: true
 
           # Linux aarch64 with SVE (Graviton 3+, Axion, Grace)
           - name: linux-aarch64-neoverse-v1
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             target_cpu: neoverse-v1
+            pgo: true
 
           # macOS x86_64 (cross-compiled on Apple Silicon runner)
           - name: macos-x86_64
@@ -147,8 +163,31 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # ratchet:dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: ${{ matrix.pgo && 'llvm-tools' || '' }}
+
+      - name: Build (PGO)
+        if: matrix.pgo
+        shell: bash
+        run: |
+          # Build a plain (non-instrumented, host-default-target) binary just to
+          # generate the tiny synthetic training fixture and its genome index —
+          # scripts/pgo-build.sh does the actual instrumented + profile-use
+          # builds of the SHIPPED binary below.
+          cargo build --release --bin gen_pgo_fixture --bin rustar-aligner
+          FIXTURE_DIR="$(mktemp -d)"
+          ./target/release/gen_pgo_fixture --out-dir "$FIXTURE_DIR" --n-reads 50000
+          IDX_DIR="$(mktemp -d)"
+          ./target/release/rustar-aligner --runMode genomeGenerate \
+            --genomeDir "$IDX_DIR" --genomeFastaFiles "$FIXTURE_DIR/genome.fa" \
+            --genomeSAindexNbases 8 --runThreadN 2
+          PGO_TARGET="${{ matrix.target }}" \
+          PGO_EXTRA_RUSTFLAGS="${TARGET_CPU:+-Ctarget-cpu=$TARGET_CPU}" \
+            bash scripts/pgo-build.sh "$IDX_DIR" "$FIXTURE_DIR/reads.fastq" 50000
+        env:
+          TARGET_CPU: ${{ matrix.target_cpu || '' }}
 
       - name: Build
+        if: ${{ !matrix.pgo }}
         shell: bash
         run: >
           cargo build --release --target ${{ matrix.target }}

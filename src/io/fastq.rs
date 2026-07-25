@@ -94,12 +94,20 @@ impl FastqReader {
 
             let file = File::open(path).map_err(|e| Error::io(e, path))?;
 
+            // Larger-than-default (8 KiB) buffers cut read syscalls on the decode
+            // hot path. Feed the inflater from a big buffered file, and hand the
+            // decoded stream to noodles through a big BufReader.
+            const DECODE_BUF: usize = 1 << 19; // 512 KiB
             if is_gzipped {
                 // Gzipped file
-                Box::new(BufReader::new(GzDecoder::new(file)))
+                let buffered = BufReader::with_capacity(DECODE_BUF, file);
+                Box::new(BufReader::with_capacity(
+                    DECODE_BUF,
+                    GzDecoder::new(buffered),
+                ))
             } else {
                 // Plain text FASTQ
-                Box::new(BufReader::new(file))
+                Box::new(BufReader::with_capacity(DECODE_BUF, file))
             }
         };
 
@@ -124,7 +132,7 @@ impl FastqReader {
             ))
         })?;
 
-        Ok(Box::new(BufReader::new(stdout)))
+        Ok(Box::new(BufReader::with_capacity(1 << 19, stdout)))
     }
 
     /// Get next read with encoded bases
