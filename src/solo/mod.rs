@@ -696,6 +696,19 @@ impl SoloContext {
     /// Process one solo read: match the cell barcode, validate the UMI, assign
     /// a gene, and (on success) produce a count record. Stats are recorded
     /// here; the returned records are appended to the recorder by the caller.
+    /// GX/GN SAM tag strings for a read's `Gene`-feature assignment:
+    /// `(gene_id, gene_name)` when uniquely assigned, else `("-", "-")`
+    /// (STARsolo convention). Drives `--outSAMattributes GX GN`.
+    pub fn gene_tags<'a>(&'a self, transcripts: &[Transcript]) -> (&'a str, &'a str) {
+        match assign_gene_se(transcripts, &self.gene_ann, self.strand, SoloFeature::Gene) {
+            GeneAssignment::Gene(g) => (
+                self.gene_ann.gene_ids[g as usize].as_str(),
+                self.gene_ann.gene_names[g as usize].as_str(),
+            ),
+            _ => ("-", "-"),
+        }
+    }
+
     pub fn process_read(
         &self,
         cdna_transcripts: &[Transcript],

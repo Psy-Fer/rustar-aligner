@@ -915,6 +915,23 @@ fn maybe_insert_rg_tag(record: &mut RecordBuf, rg_id: Option<&str>) {
     }
 }
 
+/// Add STARsolo GX/GN gene tags to each record for the read's `Gene`-feature
+/// assignment. `gx`/`gn` are the gene_id / gene_name, or `"-"` when the read is
+/// not uniquely assigned to a gene (STARsolo convention). No-ops unless the
+/// corresponding attribute bit is set in `--outSAMattributes`.
+pub fn add_gene_tags(records: &mut [RecordBuf], gx: &str, gn: &str, attrs: SamAttributes) {
+    for rec in records.iter_mut() {
+        if attrs.contains(SamAttributes::GX) {
+            rec.data_mut()
+                .insert(Tag::new(b'G', b'X'), Value::String(BString::from(gx)));
+        }
+        if attrs.contains(SamAttributes::GN) {
+            rec.data_mut()
+                .insert(Tag::new(b'G', b'N'), Value::String(BString::from(gn)));
+        }
+    }
+}
+
 /// Convert FASTQ ASCII quality bytes (Phred+33) to raw Phred values (0-93) for
 /// the BAM binary QUAL field, per SAM spec §4.2.3.
 ///

@@ -91,14 +91,16 @@ impl SmartSeqCounts {
         &self,
         raw_dir: &Path,
         gene_ids: &[String],
+        gene_names: &[String],
         gzip: bool,
     ) -> Result<usize, Error> {
         std::fs::create_dir_all(raw_dir).map_err(|e| Error::io(e, raw_dir))?;
 
         // features.tsv (CellRanger v3 layout: id, name, "Gene Expression").
+        // Column 2 is the GTF gene_name (gene_id fallback baked into gene_names).
         crate::solo::count::write_file(&raw_dir.join("features.tsv"), gzip, |w| {
-            for id in gene_ids {
-                writeln!(w, "{id}\t{id}\tGene Expression").map_err(|e| Error::io(e, raw_dir))?;
+            for (id, name) in gene_ids.iter().zip(gene_names.iter()) {
+                writeln!(w, "{id}\t{name}\tGene Expression").map_err(|e| Error::io(e, raw_dir))?;
             }
             Ok(())
         })?;
