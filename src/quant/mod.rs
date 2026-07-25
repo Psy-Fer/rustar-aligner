@@ -657,6 +657,7 @@ mod tests {
         let mut r = R(0x1234_5678_9abc_def0);
         let chr_len = 1_000_000u64;
         let genome = Genome {
+            transform_blocks: None,
             sequence: vec![0u8; (2 * chr_len) as usize].into(),
             n_genome: chr_len,
             n_genome_real: chr_len,
