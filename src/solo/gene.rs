@@ -222,7 +222,21 @@ pub fn classify_read(
                         gene_ann.overlapping_genes_into(tr, &mut raw);
                         for &g in raw.iter() {
                             exon_any = true;
-                            if strand_keeps(strand, gene_ann.gene_is_reverse[g], tr.is_reverse) {
+                            // STAR's Gene feature requires the alignment to be
+                            // *concordant* with the gene, not merely to overlap an
+                            // exon: every aligned block must lie wholly within the
+                            // gene's exons. A read whose block extends past an exon
+                            // boundary into an intron (no matching splice) is NOT a
+                            // Gene read (it may still be GeneFull/intronic). Pure
+                            // exon-overlap over-assigns such boundary reads — the
+                            // measured rustar-vs-STAR divergence.
+                            let concordant = tr
+                                .exons
+                                .iter()
+                                .all(|b| gene_ann.block_is_exonic(g, b.genome_start, b.genome_end));
+                            if concordant
+                                && strand_keeps(strand, gene_ann.gene_is_reverse[g], tr.is_reverse)
+                            {
                                 exon_s.push(g);
                             }
                         }
