@@ -1199,7 +1199,12 @@ pub fn write_gene_matrix(
             &raw_dir,
             n_genes,
         )?;
-        write_features(&raw_dir.join(&features_name), &ctx.gene_ann.gene_ids, gzip)?;
+        write_features(
+            &raw_dir.join(&features_name),
+            &ctx.gene_ann.gene_ids,
+            &ctx.gene_ann.gene_names,
+            gzip,
+        )?;
         write_barcodes(
             &raw_dir.join(&barcodes_name),
             &ctx.whitelist,
@@ -1250,7 +1255,12 @@ pub fn write_gene_matrix(
                 .enumerate()
                 .map(|(i, &cb)| (cb, i as u32 + 1))
                 .collect();
-            write_features(&filt_dir.join(&features_name), &ctx.gene_ann.gene_ids, gzip)?;
+            write_features(
+                &filt_dir.join(&features_name),
+                &ctx.gene_ann.gene_ids,
+                &ctx.gene_ann.gene_names,
+                gzip,
+            )?;
             write_barcodes_subset(&filt_dir.join(&barcodes_name), &ctx.whitelist, &cbs, gzip)?;
             let fnnz = finalize_matrix(
                 &body,
@@ -1363,7 +1373,12 @@ pub fn write_gene_matrix(
     if ctx.velocyto_enabled {
         let velo_dir = params.output_path(&format!("{solo_dir}Velocyto/raw/"));
         std::fs::create_dir_all(&velo_dir).map_err(|e| Error::io(e, &velo_dir))?;
-        write_features(&velo_dir.join(&features_name), &ctx.gene_ann.gene_ids, gzip)?;
+        write_features(
+            &velo_dir.join(&features_name),
+            &ctx.gene_ann.gene_ids,
+            &ctx.gene_ann.gene_names,
+            gzip,
+        )?;
         write_barcodes(
             &velo_dir.join(&barcodes_name),
             &ctx.whitelist,
@@ -1804,10 +1819,19 @@ fn write_cellranger_summary(
 
 /// `features.tsv`: `gene_id <TAB> gene_name <TAB> "Gene Expression"` (CellRanger
 /// v3 layout). We have no gene names, so the id is repeated.
-fn write_features(path: &Path, gene_ids: &[String], gzip: bool) -> Result<(), Error> {
+fn write_features(
+    path: &Path,
+    gene_ids: &[String],
+    gene_names: &[String],
+    gzip: bool,
+) -> Result<(), Error> {
+    // CellRanger v3 layout: gene_id <TAB> gene_name <TAB> "Gene Expression".
+    // STAR uses the GTF gene_name (--sjdbGTFtagExonParentGeneName, default
+    // gene_name) for column 2, falling back to gene_id when absent — that
+    // fallback is already baked into `gene_names`.
     write_file(path, gzip, |w| {
-        for id in gene_ids {
-            writeln!(w, "{id}\t{id}\tGene Expression").map_err(|e| Error::io(e, path))?;
+        for (id, name) in gene_ids.iter().zip(gene_names.iter()) {
+            writeln!(w, "{id}\t{name}\tGene Expression").map_err(|e| Error::io(e, path))?;
         }
         Ok(())
     })?;

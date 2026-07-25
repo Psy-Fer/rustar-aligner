@@ -28,6 +28,11 @@ use crate::junction::gtf::GtfRecord;
 pub struct GeneAnnotation {
     /// gene_id strings in GTF-file order (index = gene_idx).
     pub gene_ids: Vec<String>,
+    /// gene_name (symbol) per gene, parallel to `gene_ids`. STAR's
+    /// `--sjdbGTFtagExonParentGeneName` (default `gene_name`); falls back to the
+    /// gene_id when the GTF record has no gene_name. Column 2 of solo
+    /// `features.tsv` (STAR-faithful).
+    pub gene_names: Vec<String>,
     /// Strand per gene: true = reverse/minus strand.
     pub gene_is_reverse: Vec<bool>,
     /// Per-chromosome exon interval list, sorted by (start, end).
@@ -60,6 +65,7 @@ impl GeneAnnotation {
     pub fn from_gtf_exons_configured(exons: &[GtfRecord], genome: &Genome, gene_tag: &str) -> Self {
         let n_chrs = genome.n_chr_real;
         let mut gene_ids: Vec<String> = Vec::new();
+        let mut gene_names: Vec<String> = Vec::new();
         let mut gene_is_reverse: Vec<bool> = Vec::new();
         let mut gene_id_to_idx: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
@@ -81,6 +87,14 @@ impl GeneAnnotation {
                 gene_id_to_idx.insert(gene_id.clone(), idx);
                 let is_rev = exon.strand == '-';
                 gene_is_reverse.push(is_rev);
+                // gene_name (symbol) for features.tsv col 2; STAR falls back to
+                // the gene_id when the GTF record omits gene_name.
+                let gene_name = exon
+                    .attributes
+                    .get("gene_name")
+                    .cloned()
+                    .unwrap_or_else(|| gene_id.clone());
+                gene_names.push(gene_name);
                 gene_ids.push(gene_id);
                 gene_span.push(None);
                 idx
@@ -163,6 +177,7 @@ impl GeneAnnotation {
 
         GeneAnnotation {
             gene_ids,
+            gene_names,
             gene_is_reverse,
             chr_exons,
             chr_gene_body,

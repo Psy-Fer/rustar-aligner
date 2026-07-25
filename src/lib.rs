@@ -569,7 +569,7 @@ fn run_smartseq(
         .unwrap_or_else(|| "Solo.out/".to_string());
     let raw_dir = params.output_path(&format!("{solo_dir}Gene/raw/"));
     let gzip = matches!(params.solo_out_gzip.as_str(), "yes" | "Yes" | "true");
-    let nnz = counts.write_matrix(&raw_dir, &gene_ann.gene_ids, gzip)?;
+    let nnz = counts.write_matrix(&raw_dir, &gene_ann.gene_ids, &gene_ann.gene_names, gzip)?;
     info!(
         "STARsolo SmartSeq: wrote Gene/raw matrix ({} genes × {} cells, {} entries)",
         gene_ann.n_genes(),
@@ -2020,7 +2020,7 @@ fn align_reads_solo<W: AlignmentWriter + ?Sized>(
                                         buffer.push(record);
                                     }
                                 } else if transcripts.len() <= max_multimaps {
-                                    let records = SamWriter::build_alignment_records(
+                                    let mut records = SamWriter::build_alignment_records(
                                         &read.name,
                                         &clipped_seq,
                                         &clipped_qual,
@@ -2029,6 +2029,19 @@ fn align_reads_solo<W: AlignmentWriter + ?Sized>(
                                         params,
                                         n_for_mapq,
                                     )?;
+                                    // STARsolo GX/GN gene tags (Gene-feature assignment).
+                                    if params.out_sam_attributes.intersects(
+                                        crate::params::SamAttributes::GX
+                                            | crate::params::SamAttributes::GN,
+                                    ) {
+                                        let (gx, gn) = solo.gene_tags(&transcripts);
+                                        crate::io::sam::add_gene_tags(
+                                            &mut records,
+                                            gx,
+                                            gn,
+                                            params.out_sam_attributes,
+                                        );
+                                    }
                                     for record in records {
                                         buffer.push(record);
                                     }
