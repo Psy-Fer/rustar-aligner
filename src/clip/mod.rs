@@ -5,11 +5,13 @@
 //! (`--clip3pAdapterSeq`/`--clip3pAdapterMMp`) and the after-adapter trim
 //! (`--clip{5,3}pAfterAdapterNbases`).
 //!
-//! STAR removes the clipped bases from the read before mapping (the mapped read
-//! is the clipped one); this module reproduces the clip amounts. rustar-aligner
-//! feeds the clipped read straight to the aligner and to SAM output (matching its
-//! existing `--clip5pNbases`/`--clip3pNbases` convention), so clipped bases are
-//! dropped rather than reinserted as soft-clips.
+//! STAR maps the *clipped* read (the clipped bases don't participate in alignment)
+//! but keeps them in the SAM record as **soft-clips**: the output SEQ is the full
+//! original read and the CIGAR gains leading/trailing `S` ops for the clipped ends.
+//! rustar-aligner matches this — it aligns the clipped read, then `io::sam`'s
+//! `apply_read_clips` restores the full read and wraps the CIGAR with soft-clips
+//! (strand-aware: a read-3' clip is a leading `S` on a reverse-strand record).
+//! Unmapped reads keep the full read too (CIGAR `*`, no soft-clip).
 //!
 //! STAR clips a mate as two passes in order: 5' first (`clip5pNbases`, then
 //! `clip5pAfterAdapterNbases`), then 3' on the 5'-clipped read (`clip3pNbases`,
@@ -23,13 +25,15 @@ use crate::io::fastq::encode_base;
 use crate::params::Parameters;
 
 /// One end's clipping parameters (STAR `ClipMate`). `n` = fixed clip, `adapter` =
-/// the adapter sequence (ASCII; empty = none), `ad_mmp` = max mismatch fraction,
-/// `n_after` = extra clip after the adapter.
+/// the adapter sequence (base codes A=0..T=3; empty = none), `ad_mmp` = max
+/// mismatch fraction, `n_after` = extra clip after the adapter.
 #[derive(Debug, Clone, Default)]
 pub struct ClipEnd {
     /// `--clip{5,3}pNbases` for this end.
     pub n: usize,
-    /// `--clip3pAdapterSeq` (ASCII), empty when none. Only meaningful for the 3' end.
+    /// `--clip3pAdapterSeq` as base codes (A=0..T=3), empty when none. Only
+    /// meaningful for the 3' end. Encoded once in [`clip_params_from`] so the
+    /// scan matches the already-numeric read without re-encoding.
     pub adapter: Vec<u8>,
     /// `--clip3pAdapterMMp` (default 0.1).
     pub ad_mmp: f64,
@@ -46,24 +50,30 @@ pub struct ClipParams {
     pub three: ClipEnd,
 }
 
-/// Build [`ClipParams`] from the run's `--clip{5,3}pNbases` / `--clip3pAdapterSeq`
-/// / `--clip3pAdapterMMp` / `--clip{5,3}pAfterAdapterNbases`. `-` (STAR's sentinel)
-/// means no adapter. Built once per run and reused for every read.
-pub fn clip_params_from(params: &Parameters) -> ClipParams {
+/// Build [`ClipParams`] for `mate` (0 or 1) from the run's `--clip{5,3}pNbases`
+/// / `--clip3pAdapterSeq` / `--clip3pAdapterMMp` / `--clip{5,3}pAfterAdapterNbases`.
+/// `-` (STAR's sentinel) means no adapter. The fixed `--clip{5,3}pNbases` are
+/// per-mate (`clip5p(mate)`/`clip3p(mate)`); the adapter / mmp / after-adapter
+/// clips are single-valued and apply to both mates. Cheap to build per batch.
+pub fn clip_params_from(params: &Parameters, mate: usize) -> ClipParams {
+    // Encode the adapter to base codes (A=0..T=3) ONCE here. The read reaching
+    // clip_mate is already numeric (io::fastq encodes at read time), so the 3'
+    // Hamming scan compares numeric-vs-numeric — re-encoding the read there turned
+    // every base into N (code 4) and silently disabled all adapter clipping.
     let adapter = if params.clip3p_adapter_seq == "-" {
         Vec::new()
     } else {
-        params.clip3p_adapter_seq.as_bytes().to_vec()
+        params.clip3p_adapter_seq.bytes().map(encode_base).collect()
     };
     ClipParams {
         five: ClipEnd {
-            n: params.clip5p_nbases as usize,
+            n: params.clip5p(mate),
             adapter: Vec::new(),
             ad_mmp: 0.0,
             n_after: params.clip5p_after_adapter_nbases as usize,
         },
         three: ClipEnd {
-            n: params.clip3p_nbases as usize,
+            n: params.clip3p(mate),
             adapter,
             ad_mmp: params.clip3p_adapter_mmp,
             n_after: params.clip3p_after_adapter_nbases as usize,
@@ -128,11 +138,12 @@ pub fn clip_mate(read: &[u8], p: &ClipParams) -> (usize, usize) {
     if three_active {
         c3 = p.three.n.min(sl);
         if !p.three.adapter.is_empty() {
-            // Hamming 3' adapter scan on the read after the fixed 3' clip.
-            let x_num: Vec<u8> = s[..sl - c3].iter().map(|&b| encode_base(b)).collect();
-            let y_num: Vec<u8> = p.three.adapter.iter().map(|&b| encode_base(b)).collect();
+            // Hamming 3' adapter scan on the (already-numeric) read after the fixed
+            // 3' clip. Both `x` and the adapter are base codes; local_search skips
+            // N (code > 3) internally.
+            let x_num = &s[..sl - c3];
             let nx = x_num.len();
-            let ix_best = local_search(&x_num, &y_num, p.three.ad_mmp);
+            let ix_best = local_search(x_num, &p.three.adapter, p.three.ad_mmp);
             c3 += nx - ix_best;
         }
         if p.three.n_after > 0 {
@@ -148,10 +159,20 @@ pub fn clip_mate(read: &[u8], p: &ClipParams) -> (usize, usize) {
 mod tests {
     use super::*;
 
+    /// Encode an ASCII sequence to base codes (A=0..T=3), matching how `io::fastq`
+    /// stores reads. `clip_mate` receives numeric reads in production, so every
+    /// test feeds numeric input — passing raw ASCII would exercise a path the real
+    /// pipeline never hits (and previously masked the double-encode dead-code bug).
+    fn enc(ascii: &[u8]) -> Vec<u8> {
+        ascii.iter().map(|&b| encode_base(b)).collect()
+    }
+
+    /// 3'-adapter-only params; the adapter is stored as base codes exactly as
+    /// [`clip_params_from`] produces it.
     fn hamming_3p(adapter: &[u8], mmp: f64) -> ClipParams {
         ClipParams {
             three: ClipEnd {
-                adapter: adapter.to_vec(),
+                adapter: enc(adapter),
                 ad_mmp: mmp,
                 ..Default::default()
             },
@@ -171,25 +192,24 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert_eq!(clip_mate(b"AAACCCGGGTT", &p), (3, 2));
+        assert_eq!(clip_mate(&enc(b"AAACCCGGGTT"), &p), (3, 2));
     }
 
     #[test]
     fn adapter_3p_hamming() {
         // Adapter "AGATCGGAAGAGC"; read = insert + adapter tail -> the 13-base tail is clipped.
         let p = hamming_3p(b"AGATCGGAAGAGC", 0.1);
-        let (c5, c3) = clip_mate(b"CCCCGGGGAGATCGGAAGAGC", &p);
+        let (c5, c3) = clip_mate(&enc(b"CCCCGGGGAGATCGGAAGAGC"), &p);
         assert_eq!((c5, c3), (0, 13));
     }
 
     #[test]
     fn adapter_3p_mmp_rejects_when_strict() {
         // One mismatch in a 13-base adapter: allowed at 0.1 (1/12<=0.1), rejected at 0.0.
-        let read = b"CCCCGGGGAGATCGGAtGAGC"; // 't' lowercase -> code T, a mismatch vs adapter G
-        let read = &read.to_ascii_uppercase();
-        let (_, c3_loose) = clip_mate(read, &hamming_3p(b"AGATCGGAAGAGC", 0.1));
+        let read = enc(b"CCCCGGGGAGATCGGATGAGC"); // 'T' at pos 16 -> mismatch vs adapter 'G'
+        let (_, c3_loose) = clip_mate(&read, &hamming_3p(b"AGATCGGAAGAGC", 0.1));
         assert_eq!(c3_loose, 13);
-        let (_, c3_strict) = clip_mate(read, &hamming_3p(b"AGATCGGAAGAGC", 0.0));
+        let (_, c3_strict) = clip_mate(&read, &hamming_3p(b"AGATCGGAAGAGC", 0.0));
         assert_eq!(c3_strict, 0);
     }
 
@@ -206,14 +226,14 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert_eq!(clip_mate(b"ACGTACGTACGTACGTACGT", &p), (0, 0));
+        assert_eq!(clip_mate(&enc(b"ACGTACGTACGTACGTACGT"), &p), (0, 0));
     }
 
     #[test]
     fn after_adapter_nbases_3p() {
         let mut p = hamming_3p(b"AGATCGGAAGAGC", 0.1);
         p.three.n_after = 3;
-        let (_, c3) = clip_mate(b"CCCCGGGGAGATCGGAAGAGC", &p);
+        let (_, c3) = clip_mate(&enc(b"CCCCGGGGAGATCGGAAGAGC"), &p);
         assert_eq!(c3, 16); // 13 adapter + 3 after
     }
 
@@ -229,6 +249,19 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert_eq!(clip_mate(b"AAACCCGGGTT", &p), (2, 1));
+        assert_eq!(clip_mate(&enc(b"AAACCCGGGTT"), &p), (2, 1));
+    }
+
+    /// Regression guard for the double-encode dead-code bug: a numeric read (as the
+    /// pipeline delivers) whose 3' tail is the adapter MUST clip. Before the fix,
+    /// clip_mate re-encoded the numeric read to all-N and never clipped.
+    #[test]
+    fn numeric_read_adapter_actually_clips() {
+        let p = hamming_3p(b"AGATCGGAAGAGC", 0.1);
+        // 8-base insert + 13-base adapter, delivered as base codes.
+        let read = enc(b"CCCCGGGGAGATCGGAAGAGC");
+        assert!(read.iter().all(|&b| b <= 3), "test read must be numeric");
+        let (_, c3) = clip_mate(&read, &p);
+        assert_eq!(c3, 13, "adapter tail must be clipped on a numeric read");
     }
 }

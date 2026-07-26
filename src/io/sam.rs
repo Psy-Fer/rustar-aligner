@@ -243,10 +243,13 @@ impl SamWriter {
     /// * `transcripts` - Alignment transcripts (1 or more for multi-mappers)
     /// * `genome` - Genome index
     /// * `params` - Parameters
+    #[allow(clippy::too_many_arguments)]
     pub fn build_alignment_records(
         read_name: &str,
         read_seq: &[u8],
         read_qual: &[u8],
+        clip5p: usize,
+        clip3p: usize,
         transcripts: &[Transcript],
         genome: &Genome,
         params: &Parameters,
@@ -255,6 +258,12 @@ impl SamWriter {
         if transcripts.is_empty() {
             return Ok(Vec::new());
         }
+
+        // The transcripts were aligned against the clipped read; the core record
+        // (CIGAR core, MD, NM) is built from that aligned slice, then apply_read_clips
+        // restores the full read + soft-clips. clip5p/clip3p == 0 => aligned == full.
+        let aligned_seq = &read_seq[clip5p..read_seq.len() - clip3p];
+        let aligned_qual = &read_qual[clip5p..read_qual.len() - clip3p];
 
         let n_alignments = transcripts.len();
         let max_output = if params.out_sam_mult_nmax < 0 {
@@ -278,8 +287,8 @@ impl SamWriter {
             let mut record = transcript_to_record(
                 transcript,
                 read_name,
-                read_seq,
-                read_qual,
+                aligned_seq,
+                aligned_qual,
                 genome,
                 mapq,
                 max_output,    // NH = number of reported alignments
@@ -287,6 +296,17 @@ impl SamWriter {
                 params.out_sam_attr_ih_start,
                 attrs,
             )?;
+            if clip5p > 0 || clip3p > 0 {
+                apply_read_clips(
+                    &mut record,
+                    &transcript.cigar,
+                    read_seq,
+                    read_qual,
+                    clip5p,
+                    clip3p,
+                    transcript.is_reverse,
+                );
+            }
             maybe_insert_rg_tag(&mut record, rg_id);
             apply_sam_flag_or_and(&mut record, params);
             apply_primary_flag(&mut record, transcript.score, best_score, params);
@@ -310,12 +330,17 @@ impl SamWriter {
     /// * `genome` - Genome index
     /// * `params` - Parameters
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn build_paired_records(
         read_name: &str,
         mate1_seq: &[u8],
         mate1_qual: &[u8],
         mate2_seq: &[u8],
         mate2_qual: &[u8],
+        m1_clip5p: usize,
+        m1_clip3p: usize,
+        m2_clip5p: usize,
+        m2_clip3p: usize,
         paired_alignments: &[PairedAlignment],
         genome: &Genome,
         params: &Parameters,
@@ -364,6 +389,8 @@ impl SamWriter {
                 read_name,
                 mate1_seq,
                 mate1_qual,
+                m1_clip5p,
+                m1_clip3p,
                 &paired_aln.mate1_transcript,
                 &paired_aln.mate2_transcript,
                 genome,
@@ -393,6 +420,8 @@ impl SamWriter {
                 read_name,
                 mate2_seq,
                 mate2_qual,
+                m2_clip5p,
+                m2_clip3p,
                 &paired_aln.mate2_transcript,
                 &paired_aln.mate1_transcript,
                 genome,
@@ -1032,6 +1061,68 @@ fn fastq_qual_to_phred(qual: &[u8]) -> Vec<u8> {
     qual.iter().map(|&b| b.saturating_sub(33)).collect()
 }
 
+/// Re-attach clipped bases to a mapped record as soft-clips, matching STAR (and
+/// STAR-rs): the record is first built from the *clipped* read (so CIGAR core, MD
+/// and NM cover only the aligned bases), then this restores the full original read
+/// as SEQ/QUAL and wraps the CIGAR with soft-clips for the clipped ends.
+///
+/// `clip5p`/`clip3p` are in read 5'/3' coordinates. In SAM (genome-forward)
+/// orientation the read-5' clip is the leading soft-clip and the read-3' clip the
+/// trailing one; on a reverse-strand record the two swap. A clip adjacent to an
+/// existing (genomic) soft-clip is merged into a single `S` op (valid SAM). POS is
+/// unaffected — soft-clips consume read bases but no reference.
+fn apply_read_clips(
+    record: &mut RecordBuf,
+    core_cigar: &[cigar::Op],
+    orig_seq: &[u8],
+    orig_qual: &[u8],
+    clip5p: usize,
+    clip3p: usize,
+    is_reverse: bool,
+) {
+    use cigar::op::Kind;
+    // Full original read as SEQ/QUAL (strand-aware), replacing the clipped SEQ.
+    if is_reverse {
+        let seq: Vec<u8> = orig_seq
+            .iter()
+            .rev()
+            .map(|&b| decode_base(complement_base(b)))
+            .collect();
+        *record.sequence_mut() = Sequence::from(seq);
+        let mut q = fastq_qual_to_phred(orig_qual);
+        q.reverse();
+        *record.quality_scores_mut() = QualityScores::from(q);
+    } else {
+        let seq: Vec<u8> = orig_seq.iter().map(|&b| decode_base(b)).collect();
+        *record.sequence_mut() = Sequence::from(seq);
+        *record.quality_scores_mut() = QualityScores::from(fastq_qual_to_phred(orig_qual));
+    }
+    // Wrap the core CIGAR with soft-clips (merging into an adjacent S if present).
+    let (lead, trail) = if is_reverse {
+        (clip3p, clip5p)
+    } else {
+        (clip5p, clip3p)
+    };
+    let mut ops: Vec<cigar::Op> = Vec::with_capacity(core_cigar.len() + 2);
+    ops.extend_from_slice(core_cigar);
+    if lead > 0 {
+        if ops.first().map(|o| o.kind()) == Some(Kind::SoftClip) {
+            ops[0] = cigar::Op::new(Kind::SoftClip, ops[0].len() + lead);
+        } else {
+            ops.insert(0, cigar::Op::new(Kind::SoftClip, lead));
+        }
+    }
+    if trail > 0 {
+        let li = ops.len() - 1;
+        if ops[li].kind() == Kind::SoftClip {
+            ops[li] = cigar::Op::new(Kind::SoftClip, ops[li].len() + trail);
+        } else {
+            ops.push(cigar::Op::new(Kind::SoftClip, trail));
+        }
+    }
+    *record.cigar_mut() = ops.into_iter().collect();
+}
+
 /// Convert Transcript to SAM record
 #[allow(clippy::too_many_arguments)]
 fn transcript_to_record(
@@ -1359,6 +1450,8 @@ fn build_paired_mate_record(
     read_name: &str,
     mate_seq: &[u8],
     mate_qual: &[u8],
+    clip5p: usize,
+    clip3p: usize,
     transcript: &Transcript,
     mate_transcript: &Transcript,
     genome: &Genome,
@@ -1445,22 +1538,27 @@ fn build_paired_mate_record(
     // TLEN (insert size)
     *record.template_length_mut() = insert_size;
 
+    // Core SEQ/QUAL/MD are built from the aligned (clipped) slice; apply_read_clips
+    // below restores the full mate read + soft-clips (clip==0 => aligned == mate_seq).
+    let aligned_seq = &mate_seq[clip5p..mate_seq.len() - clip3p];
+    let aligned_qual = &mate_qual[clip5p..mate_qual.len() - clip3p];
+
     // Sequence and quality scores (reverse complement for reverse strand)
     if transcript.is_reverse {
-        let seq_bytes: Vec<u8> = mate_seq
+        let seq_bytes: Vec<u8> = aligned_seq
             .iter()
             .rev()
             .map(|&b| decode_base(complement_base(b)))
             .collect();
         *record.sequence_mut() = Sequence::from(seq_bytes);
 
-        let mut qual = fastq_qual_to_phred(mate_qual);
+        let mut qual = fastq_qual_to_phred(aligned_qual);
         qual.reverse();
         *record.quality_scores_mut() = QualityScores::from(qual);
     } else {
-        let seq_bytes: Vec<u8> = mate_seq.iter().map(|&b| decode_base(b)).collect();
+        let seq_bytes: Vec<u8> = aligned_seq.iter().map(|&b| decode_base(b)).collect();
         *record.sequence_mut() = Sequence::from(seq_bytes);
-        *record.quality_scores_mut() = QualityScores::from(fastq_qual_to_phred(mate_qual));
+        *record.quality_scores_mut() = QualityScores::from(fastq_qual_to_phred(aligned_qual));
     }
 
     // Optional tags: gated by --outSAMattributes
@@ -1504,8 +1602,20 @@ fn build_paired_mate_record(
         data.insert(Tag::new(b'j', b'I'), ji);
     }
     if attrs.contains(SamAttributes::MD) {
-        let md = build_md_tag(transcript, mate_seq, genome, transcript.is_reverse);
+        let md = build_md_tag(transcript, aligned_seq, genome, transcript.is_reverse);
         data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
+    }
+
+    if clip5p > 0 || clip3p > 0 {
+        apply_read_clips(
+            &mut record,
+            &transcript.cigar,
+            mate_seq,
+            mate_qual,
+            clip5p,
+            clip3p,
+            transcript.is_reverse,
+        );
     }
 
     Ok(record)
@@ -2067,6 +2177,8 @@ mod tests {
             "read1",
             &mate_seq,
             &mate_qual,
+            0,
+            0,
             &mate1_transcript,
             &mate2_transcript,
             &genome,
@@ -2096,6 +2208,8 @@ mod tests {
             "read1",
             &mate_seq,
             &mate_qual,
+            0,
+            0,
             &mate2_transcript,
             &mate1_transcript,
             &genome,
@@ -2181,6 +2295,8 @@ mod tests {
             "read1",
             &mate_seq,
             &mate_qual,
+            0,
+            0,
             &this_transcript,
             &mate_transcript,
             &genome,
@@ -2598,6 +2714,8 @@ mod tests {
             "read1",
             &read_seq,
             &read_qual,
+            0,
+            0,
             &transcripts,
             &genome,
             &params,
@@ -2654,6 +2772,8 @@ mod tests {
             "read1",
             &read_seq,
             &read_qual,
+            0,
+            0,
             std::slice::from_ref(&transcript),
             &genome,
             &params,
@@ -2705,6 +2825,8 @@ mod tests {
             "read1",
             &read_seq,
             &read_qual,
+            0,
+            0,
             &transcripts,
             &genome,
             &params,
@@ -2776,6 +2898,8 @@ mod tests {
             "read1",
             &read_seq,
             &read_qual,
+            0,
+            0,
             &transcripts,
             &genome,
             &params,
@@ -3136,6 +3260,8 @@ mod tests {
             "read1",
             &read_seq,
             &read_qual,
+            0,
+            0,
             &transcripts,
             &genome,
             &params,
@@ -3598,6 +3724,8 @@ mod tests {
             "read1",
             &seq,
             &qual,
+            0,
+            0,
             &mate1_trans,
             &mate2_trans,
             &genome,
@@ -3622,6 +3750,8 @@ mod tests {
             "read1",
             &seq,
             &qual,
+            0,
+            0,
             &mate2_trans,
             &mate1_trans,
             &genome,
@@ -3709,6 +3839,8 @@ mod tests {
             "read1",
             &seq1,
             &qual1,
+            0,
+            0,
             &mate1_trans,
             &mate2_trans,
             &genome,
@@ -3740,6 +3872,8 @@ mod tests {
             "read1",
             &seq2,
             &qual2,
+            0,
+            0,
             &mate2_trans,
             &mate1_trans,
             &genome,
@@ -3827,6 +3961,8 @@ mod tests {
             "read1",
             &seq,
             &qual,
+            0,
+            0,
             &mate1_trans,
             &mate2_trans,
             &genome,
@@ -3848,6 +3984,8 @@ mod tests {
             "read1",
             &seq,
             &qual,
+            0,
+            0,
             &mate2_trans,
             &mate1_trans,
             &genome,
@@ -4558,6 +4696,8 @@ mod tests {
             "read1",
             &read_seq,
             &read_qual,
+            0,
+            0,
             &transcripts,
             &genome,
             &params,
@@ -4597,6 +4737,8 @@ mod tests {
             "read1",
             &read_seq,
             &read_qual,
+            0,
+            0,
             &transcripts,
             &genome,
             &params,
@@ -4625,6 +4767,8 @@ mod tests {
             "read1",
             &read_seq,
             &read_qual,
+            0,
+            0,
             &transcripts,
             &genome,
             &params,

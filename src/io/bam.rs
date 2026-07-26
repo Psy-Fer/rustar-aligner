@@ -562,6 +562,8 @@ mod tests {
             read_name,
             &read_seq,
             &read_qual,
+            0,
+            0,
             &[transcript],
             &genome,
             &params,
