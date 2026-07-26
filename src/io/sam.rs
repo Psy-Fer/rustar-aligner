@@ -63,7 +63,7 @@ fn insert_unmapped_tags(record: &mut RecordBuf, attrs: SamAttributes, reason: Un
     if attrs.contains(SamAttributes::AS) {
         data.insert(Tag::ALIGNMENT_SCORE, Value::from(0i32));
     }
-    if attrs.contains(SamAttributes::NM) {
+    if attrs.contains(SamAttributes::NMM) {
         data.insert(Tag::new(b'n', b'M'), Value::from(0i32));
     }
     let ut = match reason {
@@ -557,6 +557,12 @@ impl SamWriter {
         if attrs.contains(SamAttributes::AS) {
             data.insert(Tag::ALIGNMENT_SCORE, Value::from(mapped_transcript.score));
         }
+        if attrs.contains(SamAttributes::NMM) {
+            data.insert(
+                Tag::new(b'n', b'M'),
+                Value::from(mapped_transcript.n_mismatch as i32),
+            );
+        }
         if attrs.contains(SamAttributes::NM) {
             data.insert(
                 Tag::EDIT_DISTANCE,
@@ -564,10 +570,6 @@ impl SamWriter {
                     mapped_transcript.n_mismatch,
                     &mapped_transcript.cigar,
                 )),
-            );
-            data.insert(
-                Tag::new(b'n', b'M'),
-                Value::from(mapped_transcript.n_mismatch as i32),
             );
         }
         if attrs.contains(SamAttributes::XS)
@@ -759,12 +761,14 @@ impl SamWriter {
             if attrs.contains(SamAttributes::AS) {
                 data.insert(Tag::ALIGNMENT_SCORE, Value::from(t.score));
             }
+            if attrs.contains(SamAttributes::NMM) {
+                data.insert(Tag::new(b'n', b'M'), Value::from(t.n_mismatch as i32));
+            }
             if attrs.contains(SamAttributes::NM) {
                 data.insert(
                     Tag::EDIT_DISTANCE,
                     Value::from(sam_spec_nm(t.n_mismatch, &t.cigar)),
                 );
-                data.insert(Tag::new(b'n', b'M'), Value::from(t.n_mismatch as i32));
             }
 
             maybe_insert_rg_tag(&mut record, rg_id);
@@ -1213,14 +1217,17 @@ fn transcript_to_record(
     if attrs.contains(SamAttributes::AS) {
         data.insert(Tag::ALIGNMENT_SCORE, Value::from(transcript.score));
     }
+    // nM (mismatch count) before NM (edit distance), matching STAR's tag order.
+    if attrs.contains(SamAttributes::NMM) {
+        data.insert(
+            Tag::new(b'n', b'M'),
+            Value::from(transcript.n_mismatch as i32),
+        );
+    }
     if attrs.contains(SamAttributes::NM) {
         data.insert(
             Tag::EDIT_DISTANCE,
             Value::from(sam_spec_nm(transcript.n_mismatch, &transcript.cigar)),
-        );
-        data.insert(
-            Tag::new(b'n', b'M'),
-            Value::from(transcript.n_mismatch as i32),
         );
     }
     if attrs.contains(SamAttributes::XS)
@@ -1576,14 +1583,17 @@ fn build_paired_mate_record(
         // STAR reports combined score (sum of both mates) for PE AS tag
         data.insert(Tag::ALIGNMENT_SCORE, Value::from(combined_score));
     }
+    // nM (mismatch count) before NM (edit distance), matching STAR's tag order.
+    if attrs.contains(SamAttributes::NMM) {
+        data.insert(
+            Tag::new(b'n', b'M'),
+            Value::from(transcript.n_mismatch as i32),
+        );
+    }
     if attrs.contains(SamAttributes::NM) {
         data.insert(
             Tag::EDIT_DISTANCE,
             Value::from(sam_spec_nm(transcript.n_mismatch, &transcript.cigar)),
-        );
-        data.insert(
-            Tag::new(b'n', b'M'),
-            Value::from(transcript.n_mismatch as i32),
         );
     }
     if attrs.contains(SamAttributes::XS)
@@ -2518,7 +2528,8 @@ mod tests {
             3, // n_alignments
             2, // hit_index
             1, // ih_start
-            SamAttributes::STANDARD,
+            // Standard + NM so both nM (mismatch count) and NM (edit distance) emit.
+            SamAttributes::STANDARD | SamAttributes::NM,
         )
         .unwrap();
 
@@ -2648,7 +2659,8 @@ mod tests {
         );
         assert_eq!(data.get(&Tag::HIT_INDEX), Some(&Value::from(1_i32)));
         assert_eq!(data.get(&Tag::ALIGNMENT_SCORE), Some(&Value::from(100_i32)));
-        assert_eq!(data.get(&Tag::EDIT_DISTANCE), Some(&Value::from(2_i32)));
+        // Standard = NH HI AS nM: the mismatch count nM, not the edit-distance NM.
+        assert_eq!(data.get(&Tag::EDIT_DISTANCE), None);
         assert_eq!(data.get(&Tag::new(b'n', b'M')), Some(&Value::from(2_i32)));
         assert_eq!(data.get(&Tag::new(b'X', b'S')), None);
     }
@@ -4054,13 +4066,15 @@ mod tests {
             data.get(&Tag::ALIGNMENT_SCORE).is_some(),
             "AS should be present"
         );
+        // STAR's Standard preset is NH HI AS nM — the mismatch count, NOT the
+        // edit-distance NM (which is opt-in via `NM` / `All`).
         assert!(
-            data.get(&Tag::EDIT_DISTANCE).is_some(),
-            "NM should be present"
+            data.get(&Tag::EDIT_DISTANCE).is_none(),
+            "NM (edit distance) should be absent from Standard"
         );
         assert!(
             data.get(&Tag::new(b'n', b'M')).is_some(),
-            "nM should be present"
+            "nM should be present in Standard"
         );
         // Non-standard tags absent
         assert!(
@@ -4378,8 +4392,9 @@ mod tests {
         let read_seq = vec![0, 1, 2, 3];
         let read_qual = vec![30, 30, 30, 30];
 
-        // SamAttributes::NM covers both "NM" and "nM" CLI tokens and emits both tags.
-        let attrs = SamAttributes::NM;
+        // NM (edit distance) and NMM (nM, mismatch count) are distinct flags now;
+        // request both to emit both tags.
+        let attrs = SamAttributes::NM | SamAttributes::NMM;
         let record = transcript_to_record(
             &transcript,
             "read1",
