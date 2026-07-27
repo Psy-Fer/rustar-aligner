@@ -430,7 +430,8 @@ mod tests {
         let mut sequence = vec![5u8; (n * 2) as usize];
         sequence[..forward.len()].copy_from_slice(forward);
         Genome {
-            sequence,
+            transform_blocks: None,
+            sequence: sequence.into(),
             n_genome: n,
             n_genome_real: n,
             n_chr_real: 1,
@@ -512,5 +513,74 @@ mod tests {
                 .sum::<usize>(),
             6
         );
+    }
+
+    /// Reverse-strand merged transcript: exercises the `m_sta = Lread - readLen - m_sta`
+    /// coordinate swap + the mate-strand flip (mate1 takes the fragment/merged strand,
+    /// mate2 the opposite) — the path the review flagged as untested.
+    #[test]
+    fn convert_reverse_strand_flips_mates_and_swaps_coords() {
+        let mate1_seq = vec![0u8, 1, 2, 3, 0, 1];
+        let rc_mate2 = vec![2u8, 3, 0, 1, 2, 3];
+        let mate2_seq = reverse_complement(&rc_mate2);
+
+        let mut genome_full = mate1_seq.clone();
+        genome_full.extend_from_slice(&rc_mate2[4..]); // genome[0..8]
+        let genome = tiny_genome(&genome_full);
+
+        let merge = pe_merge_mates(&mate1_seq, &rc_mate2, 4, 0.01).expect("should merge");
+        let merged_len = merge.merged.len();
+
+        // Same perfect single-exon alignment, but the merged read maps to the REVERSE
+        // strand (is_reverse = true).
+        let merged_tr = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: merged_len as u64,
+            is_reverse: true,
+            exons: vec![Exon {
+                genome_start: 0,
+                genome_end: merged_len as u64,
+                read_start: 0,
+                read_end: merged_len,
+                i_frag: 0,
+            }],
+            cigar: vec![Op::new(Kind::Match, merged_len)],
+            score: merged_len as i32,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: merge.merged.clone(),
+        };
+
+        let scorer = AlignmentScorer::from_params_minimal();
+        let (m1, m2) = convert_merged_transcript_to_pe(
+            &merged_tr, &merge, &mate1_seq, &mate2_seq, &genome, &scorer,
+        )
+        .expect("should convert");
+
+        // Strand flip: mate1 takes the merged (reverse) strand, mate2 the opposite.
+        assert!(m1.is_reverse, "mate1 should take the merged reverse strand");
+        assert!(!m2.is_reverse, "mate2 should be the opposite (forward)");
+
+        // Each mate still covers its full length with no mismatch, within genome [0,8].
+        assert_eq!(m1.n_mismatch, 0);
+        assert_eq!(m2.n_mismatch, 0);
+        for m in [&m1, &m2] {
+            let covered: usize = m.exons.iter().map(|e| e.read_end - e.read_start).sum();
+            assert_eq!(covered, 6, "each mate covers its 6 bp");
+            assert!(m.genome_start < m.genome_end && m.genome_end <= merged_len as u64);
+            assert_eq!(m.genome_end - m.genome_start, 6, "6 bp genomic span");
+        }
+        // The two mates occupy the mirrored offsets of the forward case: [2,8) and [0,6).
+        let spans: std::collections::HashSet<(u64, u64)> = [
+            (m1.genome_start, m1.genome_end),
+            (m2.genome_start, m2.genome_end),
+        ]
+        .into_iter()
+        .collect();
+        assert!(spans.contains(&(0, 6)) && spans.contains(&(2, 8)));
     }
 }

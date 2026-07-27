@@ -985,8 +985,19 @@ pub fn align_paired_read(
             params.pe_overlap_nbases_min,
             params.pe_overlap_mmp,
         ) {
+            // STAR's peMergeRA->mapOneRead() is a FIND step: it locates windows on the
+            // merged read WITHOUT the read-length quality gates (mappedFilter runs later,
+            // at the PE level, on the reconstructed pair — ReadAlign_oneRead.cpp:87-91).
+            // Applying the SE mappedFilter here (on the longer merged length) would drop
+            // valid merges the PE stage would keep. So find on the merged read with the
+            // length-relative gates disabled; the PE decision tree below does the real
+            // filtering after convert_merged_transcript_to_pe.
+            let mut merge_params = params.clone();
+            merge_params.out_filter_match_nmin = 0;
+            merge_params.out_filter_match_nmin_over_lread = 0.0;
+            merge_params.out_filter_score_min_over_lread = 0.0;
             let (merged_transcripts, _merged_chim, _n_mapq, _unmapped) =
-                align_read(&merge.merged, read_name, index, params)?;
+                align_read(&merge.merged, read_name, index, &merge_params)?;
             let mut converted: Vec<PairedAlignment> = Vec::new();
             for t in &merged_transcripts {
                 let Some((m1, m2)) = crate::align::pe_overlap::convert_merged_transcript_to_pe(
