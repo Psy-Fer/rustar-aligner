@@ -20,9 +20,7 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
-use rand::SeedableRng;
-use rand::distr::{Distribution, weighted::WeightedIndex};
-use rand::rngs::StdRng;
+use rustar_aligner::rng::{SplitMix64, cumulative_weights, sample_cumulative};
 
 struct Args {
     raw: PathBuf,
@@ -279,8 +277,8 @@ fn main() {
     // candidate of total t is compared against sim[*][t].
     let nonzero: Vec<usize> = (0..m.n_genes).filter(|&g| amb_prob[g] > 0.0).collect();
     let weights: Vec<f64> = nonzero.iter().map(|&g| amb_prob[g]).collect();
-    let dist = WeightedIndex::new(&weights).unwrap();
-    let mut rng = StdRng::seed_from_u64(a.seed);
+    let cumulative = cumulative_weights(&weights);
+    let mut rng = SplitMix64::seed(a.seed);
 
     // For each count t, collect the sim log-probs (so we can compare per candidate).
     // Memory: sim_n * (max_count+1) f64 — fine for ~10k * a few-thousand.
@@ -294,7 +292,7 @@ fn main() {
         sim_at[0].push(0.0);
         #[allow(clippy::needless_range_loop)] // ic is both index and multinomial term
         for ic in 1..=max_count {
-            let gi = nonzero[dist.sample(&mut rng)];
+            let gi = nonzero[sample_cumulative(&cumulative, &mut rng)];
             curr[gi] += 1;
             lp += amb_logp[gi] + (ic as f64).ln() - (curr[gi] as f64).ln();
             sim_at[ic].push(lp);

@@ -10,7 +10,6 @@ use crate::error::Error;
 use crate::index::GenomeIndex;
 use crate::params::{IntronMotifFilter, IntronStrandFilter, MultimapperOrder, Parameters};
 use crate::stats::UnmappedReason;
-use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Derive a deterministic per-read RNG seed from `run_rng_seed` + the read name.
@@ -40,7 +39,7 @@ fn shuffle_tied_prefix<T>(items: &mut [T], score_fn: impl Fn(&T) -> i32, seed: u
     if tied < 2 {
         return;
     }
-    items[..tied].shuffle(&mut StdRng::seed_from_u64(seed));
+    crate::rng::shuffle_deterministic(&mut items[..tied], seed);
 }
 
 /// Result of aligning a single read: (transcripts, chimeric_alignments, n_for_mapq, unmapped_reason)

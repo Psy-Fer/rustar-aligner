@@ -36,6 +36,7 @@ pub mod junction;
 pub mod liftover;
 pub mod mapq;
 pub mod quant;
+pub mod rng;
 pub mod signal;
 pub mod solo;
 pub mod stats;
@@ -943,10 +944,9 @@ fn pick_primary_and_mapq(
 ) -> (usize, u8) {
     use crate::align::read_align::per_read_seed;
     use crate::mapq::calculate_mapq;
-    use rand::{RngExt, SeedableRng, rngs::StdRng};
 
-    let mut rng = StdRng::seed_from_u64(per_read_seed(params.run_rng_seed, read_name));
-    let primary_hit = rng.random_range(0..n_alignments);
+    let mut rng = crate::rng::SplitMix64::seed(per_read_seed(params.run_rng_seed, read_name));
+    let primary_hit = rng.below(n_alignments);
     let mapq = calculate_mapq(n_alignments.max(n_for_mapq), params.out_sam_mapq_unique);
     (primary_hit, mapq)
 }

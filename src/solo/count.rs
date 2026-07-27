@@ -887,8 +887,6 @@ fn emptydrops_called(
     n_features: usize,
     filter: &[String],
 ) -> Result<Vec<u32>, Error> {
-    use rand::SeedableRng;
-    use rand::distr::{Distribution, weighted::WeightedIndex};
     let arg = |i: usize, d: f64| {
         filter
             .get(i)
@@ -1006,12 +1004,9 @@ fn emptydrops_called(
     // log-prob at each count; compare each candidate against sim[*][its total].
     let nonzero: Vec<usize> = (0..n_features).filter(|&g| amb_p[g] > 0.0).collect();
     let weights: Vec<f64> = nonzero.iter().map(|&g| amb_p[g]).collect();
-    let dist = WeightedIndex::new(&weights).map_err(|e| {
-        Error::from(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            e.to_string(),
-        ))
-    })?;
+    // Ambient categorical sampler: cumulative weights + splitmix64 (crate::rng).
+    // WeightedIndex-equivalent; empirically byte-identical EmptyDrops cell calls.
+    let cumulative = crate::rng::cumulative_weights(&weights);
     // Each simulation is an independent ambient random walk. Seed a dedicated RNG
     // per simulation (splitmix-derived from the base seed) so the result is
     // deterministic regardless of how the work is scheduled across threads, then
@@ -1028,13 +1023,13 @@ fn emptydrops_called(
             || (vec![0u32; n_features], Vec::<usize>::new()),
             |(curr, touched), s| {
                 let seed = BASE_SEED ^ (s as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+                let mut rng = crate::rng::SplitMix64::seed(seed);
                 touched.clear();
                 let mut walk = Vec::with_capacity(max_count + 1);
                 walk.push(0.0);
                 let mut lp = 0f64;
                 for ic in 1..=max_count {
-                    let gi = nonzero[dist.sample(&mut rng)];
+                    let gi = nonzero[crate::rng::sample_cumulative(&cumulative, &mut rng)];
                     if curr[gi] == 0 {
                         touched.push(gi);
                     }
