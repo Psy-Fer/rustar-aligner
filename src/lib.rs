@@ -39,6 +39,7 @@ pub mod quant;
 pub mod signal;
 pub mod solo;
 pub mod stats;
+pub mod wasp;
 
 use log::info;
 use noodles::sam::alignment::record::cigar;
@@ -1681,6 +1682,35 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
             Ok(())
         });
 
+        // WASP allele-specific filtering: load the VCF once (shared read-only across
+        // the parallel per-read closures). `None` unless --waspOutputMode SAMtag.
+        let wasp_ctx: Arc<Option<crate::wasp::WaspContext>> = Arc::new(
+            if params.wasp_output_mode == params::WaspOutputMode::SAMtag {
+                let vcf = params
+                    .var_vcf_file
+                    .as_ref()
+                    .expect("validated: SAMtag requires --varVCFfile");
+                let ctx = crate::wasp::WaspContext::load(
+                    vcf,
+                    &index.genome.chr_name,
+                    &index.genome.chr_start,
+                    params,
+                )
+                .map_err(|source| error::Error::Io {
+                    source,
+                    path: vcf.clone(),
+                })?;
+                info!(
+                    "WASP: loaded {} heterozygous SNVs from {}",
+                    ctx.snps.len(),
+                    vcf.display()
+                );
+                Some(ctx)
+            } else {
+                None
+            },
+        );
+
         // Stage 2: align each decoded batch on the rayon pool via run_batch_pipeline,
         // forwarding finished batches to the writer thread in input order.
         let align_result = {
@@ -1690,6 +1720,7 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
             let quant = quant.as_ref().map(Arc::clone);
             let tr = tr.as_ref().map(Arc::clone);
             let params_arc = Arc::clone(&params_arc);
+            let wasp_ctx = Arc::clone(&wasp_ctx);
             let align = move |base: u64,
                               batch: Vec<crate::io::fastq::EncodedRead>|
                   -> BatchOut<AlignmentBatchResults> {
@@ -1853,7 +1884,7 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
                                 }
                             } else if transcripts.len() <= max_multimaps {
                                 // Mapped (within multimap limit)
-                                let records = SamWriter::build_alignment_records(
+                                let mut records = SamWriter::build_alignment_records(
                                     &out_read_name,
                                     &read.sequence,
                                     &read.quality,
@@ -1864,6 +1895,19 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
                                     params,
                                     n_for_mapq,
                                 )?;
+                                // WASP allele-specific filtering: stamp vW/vA/vG by
+                                // re-mapping the allele-swapped read (STAR waspMap).
+                                if let Some(ctx) = &*wasp_ctx {
+                                    crate::wasp::annotate_records_se(
+                                        &mut records,
+                                        &transcripts,
+                                        &clipped_seq,
+                                        &read.name,
+                                        &index,
+                                        ctx,
+                                        params.out_sam_attributes,
+                                    )?;
+                                }
                                 for record in records {
                                     buffer.push(record);
                                 }
@@ -2947,6 +2991,35 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
             Ok(())
         });
 
+        // WASP allele-specific filtering: load the VCF once (shared read-only).
+        // `None` unless --waspOutputMode SAMtag.
+        let wasp_ctx: Arc<Option<crate::wasp::WaspContext>> = Arc::new(
+            if params.wasp_output_mode == params::WaspOutputMode::SAMtag {
+                let vcf = params
+                    .var_vcf_file
+                    .as_ref()
+                    .expect("validated: SAMtag requires --varVCFfile");
+                let ctx = crate::wasp::WaspContext::load(
+                    vcf,
+                    &index.genome.chr_name,
+                    &index.genome.chr_start,
+                    params,
+                )
+                .map_err(|source| error::Error::Io {
+                    source,
+                    path: vcf.clone(),
+                })?;
+                info!(
+                    "WASP: loaded {} heterozygous SNVs from {}",
+                    ctx.snps.len(),
+                    vcf.display()
+                );
+                Some(ctx)
+            } else {
+                None
+            },
+        );
+
         // Stage 2: align each decoded pair batch on the rayon pool via
         // run_batch_pipeline, forwarding finished batches to the writer in order.
         let align_result = {
@@ -2956,6 +3029,7 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
             let quant = quant.as_ref().map(Arc::clone);
             let tr = tr.as_ref().map(Arc::clone);
             let params_arc = Arc::clone(&params_arc);
+            let wasp_ctx = Arc::clone(&wasp_ctx);
             let align = move |base: u64,
                               batch: Vec<crate::io::fastq::PairedRead>|
                   -> BatchOut<AlignmentBatchResults> {
@@ -3263,7 +3337,7 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
                                 .iter()
                                 .map(|pa| PairedAlignment::clone(pa))
                                 .collect();
-                            let records = SamWriter::build_paired_records(
+                            let mut records = SamWriter::build_paired_records(
                                 &out_read_name,
                                 &paired_read.mate1.sequence,
                                 &paired_read.mate1.quality,
@@ -3278,6 +3352,20 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
                                 params,
                                 n_for_mapq,
                             )?;
+                            // WASP allele-specific filtering: stamp vW/vA/vG by
+                            // re-mapping the allele-swapped pair (STAR waspMap).
+                            if let Some(ctx) = &*wasp_ctx {
+                                crate::wasp::annotate_records_pe(
+                                    &mut records,
+                                    &paired_alns,
+                                    &m1_seq,
+                                    &m2_seq,
+                                    &paired_read.name,
+                                    &index,
+                                    ctx,
+                                    params.out_sam_attributes,
+                                )?;
+                            }
                             for record in records {
                                 buffer.push(record);
                             }

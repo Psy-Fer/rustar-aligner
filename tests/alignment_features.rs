@@ -1928,3 +1928,99 @@ fn test_starsolo_cellranger_style_matrix() {
         "expected 2 deduped molecules"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test — WASP allele-specific SAMtag (--waspOutputMode SAMtag)
+// ---------------------------------------------------------------------------
+
+/// A uniquely-mapped read overlapping a heterozygous SNV should be re-mapped with
+/// the allele swapped; since the region is unique it remaps to the same locus and
+/// gets `vW:i:1` (passed WASP). Verifies the end-to-end WASP path + that the vW tag
+/// (auto-added when `--waspOutputMode SAMtag`) reaches the SAM.
+#[test]
+fn test_wasp_samtag() {
+    let tmpdir = TempDir::new().unwrap();
+    let genome = build_genome();
+    let fasta = write_fasta(&tmpdir, &genome);
+    let genome_dir = tmpdir.path().join("genome");
+    build_index(&fasta, &genome_dir, "7", None);
+
+    // 10 reads from a unique 50 bp region [5000,5050); each overlaps the SNV at
+    // 0-based 5025 (1-based 5026), which sits mid-read.
+    let read_start = 5000usize;
+    let snv_pos0 = 5025usize; // 0-based
+    let fastq_path = tmpdir.path().join("reads.fq");
+    {
+        let mut f = fs::File::create(&fastq_path).unwrap();
+        let seq = &genome[read_start..read_start + 50];
+        for i in 0..10usize {
+            writeln!(f, "@wr{}", i + 1).unwrap();
+            f.write_all(seq).unwrap();
+            writeln!(f).unwrap();
+            writeln!(f, "+").unwrap();
+            writeln!(f, "{}", "I".repeat(50)).unwrap();
+        }
+    }
+
+    // Het SNV VCF at 1-based (snv_pos0 + 1); ALT is any base != REF.
+    let ref_base = genome[snv_pos0] as char;
+    let alt_base = if ref_base == 'A' { 'C' } else { 'A' };
+    let vcf_path = tmpdir.path().join("variants.vcf");
+    {
+        let mut f = fs::File::create(&vcf_path).unwrap();
+        writeln!(f, "##fileformat=VCFv4.2").unwrap();
+        writeln!(
+            f,
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">"
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE"
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "chr1\t{}\t.\t{}\t{}\t.\t.\t.\tGT\t0/1",
+            snv_pos0 + 1,
+            ref_base,
+            alt_base
+        )
+        .unwrap();
+    }
+
+    let output_dir = tmpdir.path().join("out_wasp");
+    fs::create_dir_all(&output_dir).unwrap();
+    let prefix = format!("{}/", output_dir.display());
+
+    cargo_bin_cmd!("rustar-aligner")
+        .args([
+            "--runMode",
+            "alignReads",
+            "--genomeDir",
+            genome_dir.to_str().unwrap(),
+            "--readFilesIn",
+            fastq_path.to_str().unwrap(),
+            "--waspOutputMode",
+            "SAMtag",
+            "--varVCFfile",
+            vcf_path.to_str().unwrap(),
+            "--outSAMtype",
+            "SAM",
+            "--outFileNamePrefix",
+            &prefix,
+        ])
+        .assert()
+        .success();
+
+    let sam = fs::read_to_string(output_dir.join("Aligned.out.sam")).unwrap();
+    let vw1 = sam
+        .lines()
+        .filter(|l| !l.starts_with('@'))
+        .filter(|l| l.split('\t').any(|f| f == "vW:i:1"))
+        .count();
+    assert_eq!(
+        vw1, 10,
+        "all 10 unique reads overlapping the het SNV should pass WASP (vW:i:1)"
+    );
+}

@@ -279,12 +279,15 @@ pub fn wasp_type(
 /// multimap window, matching STAR's `waspMap` (STAR-rs passes `match_nmin=0`,
 /// `multimap_score_range=1`, `multimap_nmax=10`). Built once and reused per read.
 pub fn wasp_remap_params(params: &Parameters) -> Parameters {
-    let mut p = params.clone();
-    p.out_filter_match_nmin = 0;
-    p.out_filter_match_nmin_over_lread = 0.0;
-    p.out_filter_multimap_score_range = 1;
-    p.out_filter_multimap_nmax = 10;
-    p
+    // STAR re-maps the allele-swapped read with the UNMODIFIED user parameters:
+    // `waspRA = new ReadAlign(Pin,…)` shares `P`, then runs the normal
+    // mapOneRead() → multMapSelect() → mappedFilter() (ReadAlign_waspMap.cpp:78-92).
+    // A read that fails mappedFilter under the user's own thresholds becomes
+    // waspType=4 (fails WASP). Relaxing outFilterMatchNminOverLread to 0 or
+    // hardcoding outFilterMultimapNmax=10 (as the original port did) is a STAR-rs
+    // divergence that lets swapped reads pass WASP that STAR would reject — so we
+    // re-map with the caller's params verbatim.
+    params.clone()
 }
 
 /// Insert `vW`/`vA`/`vG` tags on a record, gated on the requested attributes.
@@ -354,10 +357,18 @@ pub fn annotate_records_se(
             }
         }
     } else {
-        for (rec, tr) in records.iter_mut().zip(transcripts.iter()) {
-            let chr_start = index.genome.chr_start[tr.chr_idx];
-            let (vg, va) = wasp_variants(chr_start, snps, read_codes, tr);
-            if !vg.is_empty() {
+        // STAR keys waspType off the PRIMARY alignment (trBest = transcripts[0],
+        // ReadAlign_waspMap.cpp): a multimapper whose primary overlaps ≥1 variant
+        // gets waspType=2 stamped on ALL of its records; if the primary overlaps no
+        // variant, no record gets vW (even if a secondary locus does). vG/vA stay
+        // per-record (STAR runs variationAdjust per output alignment).
+        let primary = &transcripts[0];
+        let p_chr_start = index.genome.chr_start[primary.chr_idx];
+        let (p_vg, _) = wasp_variants(p_chr_start, snps, read_codes, primary);
+        if !p_vg.is_empty() {
+            for (rec, tr) in records.iter_mut().zip(transcripts.iter()) {
+                let chr_start = index.genome.chr_start[tr.chr_idx];
+                let (vg, va) = wasp_variants(chr_start, snps, read_codes, tr);
                 insert_wasp_tags(rec, 2, &vg, &va, attrs);
             }
         }
@@ -544,12 +555,22 @@ pub fn annotate_records_pe(
             }
         }
     } else {
-        for (i, pa) in paired.iter().enumerate() {
-            let (tr1, tr2) = (&pa.mate1_transcript, &pa.mate2_transcript);
-            let cs1 = index.genome.chr_start[tr1.chr_idx];
-            let cs2 = index.genome.chr_start[tr2.chr_idx];
-            let (vg, va) = wasp_variants_pe(cs1, cs2, snps, m1_codes, m2_codes, tr1, tr2);
-            if !vg.is_empty() {
+        // Key waspType off the PRIMARY pair (paired[0], = STAR trBest): a multimapping
+        // pair whose primary overlaps ≥1 variant gets vW:2 on ALL records; none if the
+        // primary overlaps no variant. vG/vA stay per-pair.
+        let primary = &paired[0];
+        let (p1, p2) = (&primary.mate1_transcript, &primary.mate2_transcript);
+        let (pcs1, pcs2) = (
+            index.genome.chr_start[p1.chr_idx],
+            index.genome.chr_start[p2.chr_idx],
+        );
+        let (p_vg, _) = wasp_variants_pe(pcs1, pcs2, snps, m1_codes, m2_codes, p1, p2);
+        if !p_vg.is_empty() {
+            for (i, pa) in paired.iter().enumerate() {
+                let (tr1, tr2) = (&pa.mate1_transcript, &pa.mate2_transcript);
+                let cs1 = index.genome.chr_start[tr1.chr_idx];
+                let cs2 = index.genome.chr_start[tr2.chr_idx];
+                let (vg, va) = wasp_variants_pe(cs1, cs2, snps, m1_codes, m2_codes, tr1, tr2);
                 for k in 0..2 {
                     if let Some(rec) = records.get_mut(2 * i + k) {
                         insert_wasp_tags(rec, 2, &vg, &va, attrs);
