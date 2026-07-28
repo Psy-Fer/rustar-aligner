@@ -2234,15 +2234,15 @@ fn align_reads_solo<W: AlignmentWriter + ?Sized>(
                                         buffer.push(record);
                                     }
                                 } else if transcripts.len() <= max_multimaps {
-                                    // Solo: preserve current (drop) behavior — pass the
-                                    // already-clipped read with 0/0, so nothing is
-                                    // re-attached (the batch-1 STARsolo validation holds).
+                                    // Soft-clip the fixed clip5p/clip3p against the post-CR4
+                                    // read (cr_seq), matching SE/PE. Default 10x has clip=0 so
+                                    // this is inert; the CR4 TSO/polyA bases stay dropped.
                                     let mut records = SamWriter::build_alignment_records(
                                         &out_read_name,
-                                        &clipped_seq,
-                                        &clipped_qual,
-                                        0,
-                                        0,
+                                        &cr_seq,
+                                        &cr_qual,
+                                        clip5p,
+                                        clip3p,
                                         &transcripts,
                                         &index.genome,
                                         params,
@@ -2597,10 +2597,14 @@ fn align_reads_solo_pe<W: AlignmentWriter + ?Sized>(
                                 {
                                     let records = SamWriter::build_half_mapped_records(
                                         &out_read_name,
-                                        &m1_seq,
-                                        &m1_qual,
-                                        &m2_seq,
-                                        &m2_qual,
+                                        &pread.mate1.sequence,
+                                        &pread.mate1.quality,
+                                        &pread.mate2.sequence,
+                                        &pread.mate2.quality,
+                                        clip5p_m1,
+                                        clip3p_m1,
+                                        clip5p_m2,
+                                        clip3p_m2,
                                         mapped_transcript,
                                         *mate1_is_mapped,
                                         &index.genome,
@@ -2616,18 +2620,18 @@ fn align_reads_solo_pe<W: AlignmentWriter + ?Sized>(
                                     .iter()
                                     .map(|pa| PairedAlignment::clone(pa))
                                     .collect();
-                                // Solo: preserve current (drop) behavior — already-clipped
-                                // mate seqs with 0/0 clips (batch-1 STARsolo validation holds).
+                                // Soft-clip the fixed per-mate clips against the original
+                                // mate reads (matching SE/PE non-solo). Inert at default 10x.
                                 let records = SamWriter::build_paired_records(
                                     &out_read_name,
-                                    &m1_seq,
-                                    &m1_qual,
-                                    &m2_seq,
-                                    &m2_qual,
-                                    0,
-                                    0,
-                                    0,
-                                    0,
+                                    &pread.mate1.sequence,
+                                    &pread.mate1.quality,
+                                    &pread.mate2.sequence,
+                                    &pread.mate2.quality,
+                                    clip5p_m1,
+                                    clip3p_m1,
+                                    clip5p_m2,
+                                    clip3p_m2,
                                     &paired_alns,
                                     &index.genome,
                                     params,
@@ -3316,10 +3320,14 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
                             {
                                 let records = SamWriter::build_half_mapped_records(
                                     &out_read_name,
-                                    &m1_seq,
-                                    &m1_qual,
-                                    &m2_seq,
-                                    &m2_qual,
+                                    &paired_read.mate1.sequence,
+                                    &paired_read.mate1.quality,
+                                    &paired_read.mate2.sequence,
+                                    &paired_read.mate2.quality,
+                                    m1_clip5p,
+                                    m1_clip3p,
+                                    m2_clip5p,
+                                    m2_clip3p,
                                     mapped_transcript,
                                     *mate1_is_mapped,
                                     &index.genome,

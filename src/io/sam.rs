@@ -460,12 +460,17 @@ impl SamWriter {
     /// **Unmapped mate:** FLAG 0x4, co-located at mapped mate's position.
     ///   SEQ/QUAL in forward orientation (no RC).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn build_half_mapped_records(
         read_name: &str,
         mate1_seq: &[u8],
         mate1_qual: &[u8],
         mate2_seq: &[u8],
         mate2_qual: &[u8],
+        m1_clip5p: usize,
+        m1_clip3p: usize,
+        m2_clip5p: usize,
+        m2_clip3p: usize,
         mapped_transcript: &Transcript,
         mate1_is_mapped: bool,
         genome: &Genome,
@@ -485,12 +490,22 @@ impl SamWriter {
         let chr_start = genome.chr_start[mapped_transcript.chr_idx];
         let mapped_pos = (mapped_transcript.genome_start - chr_start + 1) as usize;
 
-        // Determine which sequences go where
-        let (mapped_seq, mapped_qual, unmapped_seq, unmapped_qual) = if mate1_is_mapped {
-            (mate1_seq, mate1_qual, mate2_seq, mate2_qual)
-        } else {
-            (mate2_seq, mate2_qual, mate1_seq, mate1_qual)
-        };
+        // Determine which sequences (and clip amounts) go where. mate seqs are the
+        // full original reads; the mapped mate's core is built from its aligned slice
+        // and soft-clipped below, the unmapped mate keeps the full read.
+        let (mapped_seq, mapped_qual, unmapped_seq, unmapped_qual, mapped_clip5p, mapped_clip3p) =
+            if mate1_is_mapped {
+                (
+                    mate1_seq, mate1_qual, mate2_seq, mate2_qual, m1_clip5p, m1_clip3p,
+                )
+            } else {
+                (
+                    mate2_seq, mate2_qual, mate1_seq, mate1_qual, m2_clip5p, m2_clip3p,
+                )
+            };
+        // Aligned slice of the mapped mate (core SEQ/CIGAR/MD built from this).
+        let aligned_mapped_seq = &mapped_seq[mapped_clip5p..mapped_seq.len() - mapped_clip3p];
+        let aligned_mapped_qual = &mapped_qual[mapped_clip5p..mapped_qual.len() - mapped_clip3p];
 
         // --- Build mapped mate record ---
         let mut mapped_rec = RecordBuf::default();
@@ -525,22 +540,22 @@ impl SamWriter {
             })?);
         *mapped_rec.template_length_mut() = 0;
 
-        // SEQ/QUAL
+        // SEQ/QUAL (core from the aligned slice; apply_read_clips restores full read)
         if mapped_transcript.is_reverse {
-            let seq_bytes: Vec<u8> = mapped_seq
+            let seq_bytes: Vec<u8> = aligned_mapped_seq
                 .iter()
                 .rev()
                 .map(|&b| decode_base(complement_base(b)))
                 .collect();
             *mapped_rec.sequence_mut() = Sequence::from(seq_bytes);
-            let mut qual = fastq_qual_to_phred(mapped_qual);
+            let mut qual = fastq_qual_to_phred(aligned_mapped_qual);
             qual.reverse();
             *mapped_rec.quality_scores_mut() = QualityScores::from(qual);
         } else {
-            let seq_bytes: Vec<u8> = mapped_seq.iter().map(|&b| decode_base(b)).collect();
+            let seq_bytes: Vec<u8> = aligned_mapped_seq.iter().map(|&b| decode_base(b)).collect();
             *mapped_rec.sequence_mut() = Sequence::from(seq_bytes);
             *mapped_rec.quality_scores_mut() =
-                QualityScores::from(fastq_qual_to_phred(mapped_qual));
+                QualityScores::from(fastq_qual_to_phred(aligned_mapped_qual));
         }
 
         // Optional tags on mapped mate
@@ -590,7 +605,7 @@ impl SamWriter {
         if attrs.contains(SamAttributes::MD) {
             let md = build_md_tag(
                 mapped_transcript,
-                mapped_seq,
+                aligned_mapped_seq,
                 genome,
                 mapped_transcript.is_reverse,
             );
@@ -598,6 +613,19 @@ impl SamWriter {
         }
         maybe_insert_rg_tag(&mut mapped_rec, rg_id);
         apply_sam_flag_or_and(&mut mapped_rec, params);
+        // Soft-clip the mapped mate's clipped bases (STAR convention), matching the
+        // both-mapped path. No-op when the mapped mate has no clip.
+        if mapped_clip5p > 0 || mapped_clip3p > 0 {
+            apply_read_clips(
+                &mut mapped_rec,
+                &mapped_transcript.cigar,
+                mapped_seq,
+                mapped_qual,
+                mapped_clip5p,
+                mapped_clip3p,
+                mapped_transcript.is_reverse,
+            );
+        }
 
         // --- Build unmapped mate record ---
         let mut unmapped_rec = RecordBuf::default();
@@ -4488,6 +4516,10 @@ mod tests {
             &mate1_qual,
             &mate2_seq,
             &mate2_qual,
+            0,
+            0,
+            0,
+            0,
             &mapped_transcript,
             true, // mate1_is_mapped
             &genome,
@@ -4556,6 +4588,10 @@ mod tests {
             &mate1_qual,
             &mate2_seq,
             &mate2_qual,
+            0,
+            0,
+            0,
+            0,
             &mapped_transcript,
             true,
             &genome,
@@ -4639,6 +4675,10 @@ mod tests {
             &mate1_qual,
             &mate2_seq,
             &mate2_qual,
+            0,
+            0,
+            0,
+            0,
             &mapped_transcript,
             true,
             &genome,
@@ -4656,6 +4696,10 @@ mod tests {
             &mate1_qual,
             &mate2_seq,
             &mate2_qual,
+            0,
+            0,
+            0,
+            0,
             &mapped_transcript,
             false,
             &genome,
