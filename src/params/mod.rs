@@ -534,6 +534,40 @@ pub struct Parameters {
     #[arg(long = "readFilesCommand")]
     pub read_files_command: Option<String>,
 
+    /// Prefix prepended to every path in `--readFilesIn`.
+    #[arg(long = "readFilesPrefix", default_value = "")]
+    pub read_files_prefix: String,
+
+    /// Input format: `Fastx` (default, FASTA/FASTQ).
+    #[arg(long = "readFilesType", num_args = 1..=2, default_values_t = vec!["Fastx".to_string()])]
+    pub read_files_type: Vec<String>,
+
+    /// SAM tag holding the barcode sequence when reading aligned input.
+    #[arg(long = "soloInputSAMattrBarcodeSeq", num_args = 1.., default_values_t = vec!["-".to_string()])]
+    pub solo_input_sam_attr_barcode_seq: Vec<String>,
+
+    /// SAM tag holding the barcode qualities when reading aligned input.
+    #[arg(long = "soloInputSAMattrBarcodeQual", num_args = 1.., default_values_t = vec!["-".to_string()])]
+    pub solo_input_sam_attr_barcode_qual: Vec<String>,
+
+    /// SAM attributes to carry over when reading aligned input.
+    #[arg(long = "readFilesSAMattrKeep", num_args = 1.., default_values_t = vec!["All".to_string()])]
+    pub read_files_sam_attr_keep: Vec<String>,
+
+    /// Characters that terminate a read name. Everything from the first
+    /// occurrence of any of these is dropped. `-` keeps the whole name.
+    #[arg(long = "readNameSeparator", num_args = 1.., default_values_t = vec!["/".to_string()])]
+    pub read_name_separator: Vec<String>,
+
+    /// Phred offset of the input quality strings (33 or 64). 0 selects 33.
+    #[arg(long = "readQualityScoreBase", default_value_t = 33)]
+    pub read_quality_score_base: i32,
+
+    /// Read lengths declared up front, when they are not to be taken from the
+    /// input.
+    #[arg(long = "readMatesLengthsIn", default_value = "NotEqual")]
+    pub read_mates_lengths_in: String,
+
     /// `--soloType SmartSeq` manifest: a TSV with `read1 <TAB> read2 <TAB> cellID`
     /// per line (`read2` = `-` for single-end). Each line is one plate-well cell;
     /// reads are counted per gene with no UMI.
@@ -632,10 +666,117 @@ pub struct Parameters {
     #[arg(long = "limitGenomeGenerateRAM", default_value = "31G", value_parser = parse_mem_bytes)]
     pub limit_genome_generate_ram: u64,
 
+    /// Size of the I/O buffers, as input and output byte counts.
+    #[arg(long = "limitIObufferSize", num_args = 1..=2,
+          default_values_t = vec![30_000_000u64, 50_000_000u64])]
+    pub limit_io_buffer_size: Vec<u64>,
+
+    /// Soft limit on the number of reads processed.
+    #[arg(long = "limitNreadsSoft", default_value_t = -1i64, allow_hyphen_values = true)]
+    pub limit_nreads_soft: i64,
+
+    /// Maximum size in bytes of the SAM records emitted for one read.
+    #[arg(long = "limitOutSAMoneReadBytes", default_value_t = 100_000u64)]
+    pub limit_out_sam_one_read_bytes: u64,
+
+    /// Maximum number of collapsed junctions.
+    #[arg(long = "limitOutSJcollapsed", default_value_t = 1_000_000u64)]
+    pub limit_out_sj_collapsed: u64,
+
+    /// Maximum number of junctions recorded for one read.
+    #[arg(long = "limitOutSJoneRead", default_value_t = 1_000u64)]
+    pub limit_out_sj_one_read: u64,
+
+    /// Maximum number of junctions inserted on the fly.
+    #[arg(long = "limitSjdbInsertNsj", default_value_t = 1_000_000u64)]
+    pub limit_sjdb_insert_nsj: u64,
+
+    /// Permissions for directories created by the run.
+    #[arg(long = "runDirPerm", default_value = "User_RWX")]
+    pub run_dir_perm: String,
+
+    /// Declared sizes of the genome files.
+    #[arg(long = "genomeFileSizes", num_args = 1.., default_values_t = vec![0u64])]
+    pub genome_file_sizes: Vec<u64>,
+
     /// Route primary alignment output to stdout instead of a file.
     /// Values: None (default), SAM, BAM_Unsorted, BAM_SortedByCoordinate.
     #[arg(long = "outStd", default_value = "None")]
     pub out_std: OutStd,
+
+    /// Alignment output mode: `Full` (default), `NoQS` (omit quality strings)
+    /// or `None` (no alignment output at all).
+    #[arg(long = "outSAMmode", default_value = "Full")]
+    pub out_sam_mode: String,
+
+    /// Order of alignments in the output: `Paired` (default) or
+    /// `PairedKeepInputOrder`.
+    #[arg(long = "outSAMorder", default_value = "Paired")]
+    pub out_sam_order: String,
+
+    /// Post-alignment record filter. Only the default (no filtering) is
+    /// supported; the added-reference modes need align-time reference
+    /// insertion, which this aligner does not do.
+    #[arg(long = "outSAMfilter", num_args = 1.., default_values_t = vec!["None".to_string()])]
+    pub out_sam_filter: Vec<String>,
+
+    /// `@HD` header line, given as its tab-separated fields.
+    #[arg(long = "outSAMheaderHD", num_args = 1..)]
+    pub out_sam_header_hd: Vec<String>,
+
+    /// Extra `@PG` header line, given as its tab-separated fields.
+    #[arg(long = "outSAMheaderPG", num_args = 1..)]
+    pub out_sam_header_pg: Vec<String>,
+
+    /// File whose lines are emitted as `@CO` header comments.
+    #[arg(long = "outSAMheaderCommentFile", default_value = "-")]
+    pub out_sam_header_comment_file: String,
+
+    /// Added to every output quality score. Use -31 to convert Phred+64 input
+    /// to Phred+33 output.
+    #[arg(
+        long = "outQSconversionAdd",
+        default_value_t = 0,
+        allow_hyphen_values = true
+    )]
+    pub out_qs_conversion_add: i32,
+
+    /// Splice-junction output: `Standard` (default) writes SJ.out.tab, `None`
+    /// suppresses it.
+    #[arg(long = "outSJtype", default_value = "Standard")]
+    pub out_sj_type: String,
+
+    /// Which reads contribute to SJ.out.tab: `All` (default) or `Unique`.
+    #[arg(long = "outSJfilterReads", default_value = "All")]
+    pub out_sj_filter_reads: String,
+
+    /// Prefix for reference names in signal output.
+    #[arg(long = "outWigReferencesPrefix", default_value = "-")]
+    pub out_wig_references_prefix: String,
+
+    /// Directory for intermediate files.
+    #[arg(long = "outTmpDir", default_value = "-")]
+    pub out_tmp_dir: String,
+
+    /// Keep intermediate files after the run.
+    #[arg(long = "outTmpKeep", default_value = "None")]
+    pub out_tmp_keep: String,
+
+    /// Number of bins used when sorting BAM by coordinate.
+    #[arg(long = "outBAMsortingBinsN", default_value_t = 50)]
+    pub out_bam_sorting_bins_n: usize,
+
+    /// Threads used for BAM sorting. 0 selects `--runThreadN`.
+    #[arg(long = "outBAMsortingThreadN", default_value_t = 0)]
+    pub out_bam_sorting_thread_n: usize,
+
+    /// gzip level for the transcriptome BAM, -1 to 10.
+    #[arg(
+        long = "quantTranscriptomeBAMcompression",
+        default_value_t = 1,
+        allow_hyphen_values = true
+    )]
+    pub quant_transcriptome_bam_compression: i32,
 
     /// Strand field: None or intronMotif
     #[arg(long = "outSAMstrandField", default_value = "None")]
