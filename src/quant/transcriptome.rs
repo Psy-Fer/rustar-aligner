@@ -2184,6 +2184,56 @@ mod tests {
     }
 
     #[test]
+    fn project_two_exon_align_onto_reverse_strand_transcript() {
+        // Regression coverage for the multi-exon minus-strand projection flip
+        // (STAR canonSJ == -999 branch): exon order must reverse, t-space and read
+        // coords must invert relative to transcript/read length, and N ops drop.
+        use cigar::op::{Kind, Op};
+        let genome = make_genome();
+        // Reverse transcript T1: chr1 [100,200) + [300,400) - strand. tr_length = 200.
+        let gtf = vec![
+            make_exon("chr1", 101, 200, '-', "G1", "T1"),
+            make_exon("chr1", 301, 400, '-', "G1", "T1"),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
+
+        // Spliced align (forward on genome), junction matches the transcript junction:
+        // genome [150,200) + [300,350); read [0,50) + [50,100).
+        let align = make_align(
+            0,
+            false,
+            vec![(150, 200, 0, 50), (300, 350, 50, 100)],
+            vec![
+                Op::new(Kind::Match, 50),
+                Op::new(Kind::Skip, 100),
+                Op::new(Kind::Match, 50),
+            ],
+        );
+        let results = align_to_transcripts(&align, &idx, 100);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+
+        // Strand flips (tr_strand == 2, align.is_reverse == false → projected true).
+        assert!(r.is_reverse);
+        assert_eq!(r.exons.len(), 2);
+        // Pre-flip t-space exons: [50,100) r[0,50) and [100,150) r[50,100).
+        // Flip (tr_len=200, lread=100) then reverse exon order:
+        //   old exon1 [100,150) → g 200-(100+50)=50 → [50,100),  r 100-(50+50)=0 → [0,50)
+        //   old exon0 [50,100)  → g 200-(50+50)=100 → [100,150), r 100-(0+50)=50 → [50,100)
+        assert_eq!(r.exons[0].genome_start, 50);
+        assert_eq!(r.exons[0].genome_end, 100);
+        assert_eq!(r.exons[0].read_start, 0);
+        assert_eq!(r.exons[0].read_end, 50);
+        assert_eq!(r.exons[1].genome_start, 100);
+        assert_eq!(r.exons[1].genome_end, 150);
+        assert_eq!(r.exons[1].read_start, 50);
+        assert_eq!(r.exons[1].read_end, 100);
+        // N stripped, two M blocks remain.
+        assert!(r.cigar.iter().all(|op| op.kind() != Kind::Skip));
+        assert_eq!(r.cigar.len(), 2);
+    }
+
+    #[test]
     fn project_multi_exon_align_onto_longer_transcript() {
         use cigar::op::{Kind, Op};
         let genome = make_genome();

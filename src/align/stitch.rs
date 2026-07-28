@@ -9,6 +9,11 @@ use noodles::sam::alignment::record::cigar;
 /// Separates mate1 and mate2 fragments in the combined PE read.
 pub(crate) const PE_SPACER_BASE: u8 = 11;
 
+/// Sentinel score returned by end-to-end extension (`--alignEndsType`) when the
+/// forced extension runs into a chromosome boundary. STAR sets a large negative
+/// score here; we use it to reject the transcript in `finalize_transcript`.
+const EXTEND_TO_END_KILL: i32 = i32::MIN / 2;
+
 /// Count mismatches in an alignment by comparing read sequence to genome sequence.
 ///
 /// The read sequence is always in forward orientation. For reverse-strand alignments,
@@ -191,6 +196,7 @@ fn extend_alignment(
     p_mm_max: f64,
     index: &GenomeIndex,
     is_reverse: bool,
+    extend_to_end: bool,
 ) -> ExtendResult {
     if max_extend == 0 {
         return ExtendResult {
@@ -201,6 +207,86 @@ fn extend_alignment(
     }
 
     let genome_offset = if is_reverse { index.genome.n_genome } else { 0 };
+
+    // --alignEndsType end-to-end extension (STAR extendAlign.cpp, extendToEnd==true):
+    // force extension over the entire remaining read, scoring +1 match / -1 mismatch
+    // with no maximum-score tracking and no mismatch-limit break. Ns are free.
+    // Hitting a chromosome boundary kills the transcript (no soft-clip past the end).
+    if extend_to_end {
+        let mut score: i32 = 0;
+        let mut n_mm = 0u32;
+        let mut ext_len = 0usize;
+        for i in 0..max_extend {
+            let read_pos = if direction > 0 {
+                read_start + i
+            } else {
+                if read_start < 1 + i {
+                    break;
+                }
+                read_start - 1 - i
+            };
+            if read_pos >= read_seq.len() {
+                break;
+            }
+            let read_base = read_seq[read_pos];
+            // No extension through the inter-mate spacer.
+            if read_base == PE_SPACER_BASE {
+                break;
+            }
+            let genome_pos = if direction > 0 {
+                genome_start + i as u64
+            } else {
+                if genome_start < 1 + i as u64 {
+                    // ran off the genome start — treat as boundary kill
+                    return ExtendResult {
+                        extend_len: 0,
+                        max_score: EXTEND_TO_END_KILL,
+                        n_mismatch: n_mm_max + 1,
+                    };
+                }
+                genome_start - 1 - i as u64
+            };
+            let Some(genome_base) = index.genome.get_base(genome_pos + genome_offset) else {
+                return ExtendResult {
+                    extend_len: 0,
+                    max_score: EXTEND_TO_END_KILL,
+                    n_mismatch: n_mm_max + 1,
+                };
+            };
+            // Chromosome boundary: cannot extend to the read end here.
+            if genome_base == 5 {
+                return ExtendResult {
+                    extend_len: 0,
+                    max_score: EXTEND_TO_END_KILL,
+                    n_mismatch: n_mm_max + 1,
+                };
+            }
+            ext_len = i + 1;
+            // Ns (read or genome) carry no score.
+            if read_base == 4 || genome_base == 4 {
+                continue;
+            }
+            if read_base == genome_base {
+                score += 1;
+            } else {
+                n_mm += 1;
+                score -= 1;
+            }
+        }
+        return if ext_len > 0 {
+            ExtendResult {
+                extend_len: ext_len,
+                max_score: score,
+                n_mismatch: n_mm,
+            }
+        } else {
+            ExtendResult {
+                extend_len: 0,
+                max_score: 0,
+                n_mismatch: 0,
+            }
+        };
+    }
 
     let mut score: i32 = 0;
     let mut max_score: i32 = 0;
@@ -1125,6 +1211,7 @@ fn stitch_align_to_transcript(
             scorer.p_mm_max,
             index,
             cluster.is_reverse,
+            false, // internal stitch extension: alignEndsType applied at finalize
         );
         if right_ext.extend_len > 0 {
             let last = new_wt.exons.last_mut().unwrap();
@@ -1183,6 +1270,7 @@ fn stitch_align_to_transcript(
             scorer.p_mm_max,
             index,
             cluster.is_reverse,
+            false, // internal stitch extension: alignEndsType applied at finalize
         );
         if left_ext.extend_len > 0 {
             let last = new_wt.exons.last_mut().unwrap();
@@ -1665,11 +1753,23 @@ pub(crate) fn finalize_transcript(
     original_is_reverse: bool,
     no_left_ext: bool,
     no_right_ext: bool,
+    imate: u8,
 ) -> Option<Transcript> {
     use crate::align::transcript::Exon;
 
     let alignment_start = wt.read_start;
     let alignment_end = wt.read_end;
+
+    // --alignEndsType: decide whether each end is force-extended (no soft-clip).
+    // `read_seq` is a single mate's slice, so `original_is_reverse` here equals
+    // STAR's `(Str != imate)`: when the slice is reverse-complemented, the read's
+    // 5' end sits on the right. STAR indexes ext[imate][iEnd] with iEnd 0 = 5',
+    // 1 = 3', so the left/start end maps to `original_is_reverse` and the
+    // right/end to its complement.
+    let ext = scorer.align_ends_type.ext;
+    let mi = (imate as usize).min(1);
+    let extend_left_to_end = ext[mi][original_is_reverse as usize];
+    let extend_right_to_end = ext[mi][(!original_is_reverse) as usize];
 
     // Guard: exon positions must be within read bounds. Out-of-bounds positions can
     // arise when a combined PE read's WorkingTranscript has junction shifts that extend
@@ -1708,6 +1808,7 @@ pub(crate) fn finalize_transcript(
                 scorer.p_mm_max,
                 index,
                 cluster.is_reverse,
+                extend_left_to_end,
             )
         } else {
             zero_extend.clone()
@@ -1726,6 +1827,7 @@ pub(crate) fn finalize_transcript(
                 scorer.p_mm_max,
                 index,
                 cluster.is_reverse,
+                extend_right_to_end,
             )
         } else {
             zero_extend.clone()
@@ -1746,6 +1848,7 @@ pub(crate) fn finalize_transcript(
                 scorer.p_mm_max,
                 index,
                 cluster.is_reverse,
+                extend_right_to_end,
             )
         } else {
             zero_extend.clone()
@@ -1764,12 +1867,19 @@ pub(crate) fn finalize_transcript(
                 scorer.p_mm_max,
                 index,
                 cluster.is_reverse,
+                extend_left_to_end,
             )
         } else {
             zero_extend
         };
         (left, right)
     };
+
+    // End-to-end extension that ran into a chromosome boundary kills the
+    // transcript (STAR: no soft-clipping past the read end in EndToEnd mode).
+    if left_extend.max_score == EXTEND_TO_END_KILL || right_extend.max_score == EXTEND_TO_END_KILL {
+        return None;
+    }
 
     // STAR finalization check: exon lengths including repeat lengths (shiftSJ)
     // For non-annotated junctions: exon_len >= alignSJoverhangMin + shiftSJ[side]
@@ -2113,6 +2223,7 @@ fn stitch_recurse(
                         scorer.p_mm_max,
                         index,
                         cluster.is_reverse,
+                        false, // internal stitch extension: alignEndsType applied at finalize
                     )
                 } else {
                     zero_ext.clone()
@@ -2132,6 +2243,7 @@ fn stitch_recurse(
                         scorer.p_mm_max,
                         index,
                         cluster.is_reverse,
+                        false, // internal stitch extension: alignEndsType applied at finalize
                     )
                 } else {
                     zero_ext.clone()
@@ -2157,6 +2269,7 @@ fn stitch_recurse(
                         scorer.p_mm_max,
                         index,
                         cluster.is_reverse,
+                        false, // internal stitch extension: alignEndsType applied at finalize
                     )
                 } else {
                     zero_ext
@@ -2177,6 +2290,7 @@ fn stitch_recurse(
                         scorer.p_mm_max,
                         index,
                         cluster.is_reverse,
+                        false, // internal stitch extension: alignEndsType applied at finalize
                     )
                 } else {
                     zero_ext
@@ -2576,6 +2690,7 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
             stitch_is_reverse,
             false,
             false,
+            0, // single-end read is mate 0
         ) {
             // Restore original reverse-strand flag and read sequence for SAM output.
             if stitch_is_reverse {
@@ -2873,6 +2988,7 @@ pub(crate) fn stitch_seeds_core(
                         scorer.p_mm_max,
                         index,
                         false,
+                        false, // pre-ext scoring: alignEndsType applied at finalize
                     )
                 } else {
                     zero_ext.clone()
@@ -2891,6 +3007,7 @@ pub(crate) fn stitch_seeds_core(
                         scorer.p_mm_max,
                         index,
                         false,
+                        false, // pre-ext scoring: alignEndsType applied at finalize
                     )
                 } else {
                     zero_ext.clone()
@@ -2911,6 +3028,7 @@ pub(crate) fn stitch_seeds_core(
                         scorer.p_mm_max,
                         index,
                         false,
+                        false, // pre-ext scoring: alignEndsType applied at finalize
                     )
                 } else {
                     zero_ext.clone()
@@ -2929,6 +3047,7 @@ pub(crate) fn stitch_seeds_core(
                         scorer.p_mm_max,
                         index,
                         false,
+                        false, // pre-ext scoring: alignEndsType applied at finalize
                     )
                 } else {
                     zero_ext.clone()
@@ -3213,7 +3332,7 @@ mod tests {
             0,   // no previous length
             10,  // n_mm_max
             0.3, // p_mm_max
-            &index, false, // forward strand
+            &index, false, false, // forward strand, local
         );
 
         assert_eq!(result.extend_len, 5);
@@ -3238,7 +3357,7 @@ mod tests {
             0,   // no previous length
             10,  // n_mm_max
             0.3, // p_mm_max
-            &index, false,
+            &index, false, false,
         );
 
         assert_eq!(result.extend_len, 5);
@@ -3263,7 +3382,7 @@ mod tests {
             0,   // no previous length
             10,  // n_mm_max
             0.3, // p_mm_max
-            &index, false,
+            &index, false, false,
         );
 
         // Should extend 4 bases (perfect match), then mismatches drag score down
@@ -3285,7 +3404,7 @@ mod tests {
             0, // genome_start
             1, // rightward
             5, // max_extend
-            0, 0, 10, 0.3, &index, false,
+            0, 0, 10, 0.3, &index, false, false,
         );
 
         // Should stop at 3 bases (genome boundary)
@@ -3301,7 +3420,7 @@ mod tests {
         // Read: A A C G (matches at 0, N skip at 1, matches at 2-3)
         let read_seq: Vec<u8> = vec![0, 0, 1, 2];
 
-        let result = extend_alignment(&read_seq, 0, 0, 1, 4, 0, 0, 10, 0.3, &index, false);
+        let result = extend_alignment(&read_seq, 0, 0, 1, 4, 0, 0, 10, 0.3, &index, false, false);
 
         // Should extend all 4 bases: match + N(skip) + match + match = score 3
         assert_eq!(result.extend_len, 4);
@@ -3317,7 +3436,7 @@ mod tests {
         // Read: T T T T (all 3, complete mismatch)
         let read_seq: Vec<u8> = vec![3, 3, 3, 3];
 
-        let result = extend_alignment(&read_seq, 0, 0, 1, 4, 0, 0, 10, 0.3, &index, false);
+        let result = extend_alignment(&read_seq, 0, 0, 1, 4, 0, 0, 10, 0.3, &index, false, false);
 
         // Score never goes positive, so extend_len should be 0
         assert_eq!(result.extend_len, 0);
@@ -3333,7 +3452,7 @@ mod tests {
         //       M M M X M M M M M M M M M M
         let read_seq: Vec<u8> = vec![0, 1, 2, 0, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1];
 
-        let result = extend_alignment(&read_seq, 0, 0, 1, 14, 0, 0, 10, 0.3, &index, false);
+        let result = extend_alignment(&read_seq, 0, 0, 1, 14, 0, 0, 10, 0.3, &index, false, false);
 
         // Should extend past the mismatch: 3M + 1X + 10M
         // Score: +3 -1 +10 = 12, best at position 14
@@ -3350,11 +3469,49 @@ mod tests {
 
         let result = extend_alignment(
             &read_seq, 0, 0, 1, 0, // max_extend = 0
-            0, 0, 10, 0.3, &index, false,
+            0, 0, 10, 0.3, &index, false, false,
         );
 
         assert_eq!(result.extend_len, 0);
         assert_eq!(result.max_score, 0);
+    }
+
+    #[test]
+    fn test_extend_to_end_forces_full_extension() {
+        // Genome: A C G T A C G T A C (10 bases)
+        let genome_seq = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let index = make_index_with_seq(&genome_seq);
+        // Read: A C G X X (2 trailing mismatches vs genome T A -> C C).
+        // Local would stop after 3 matches (soft-clip 2); EndToEnd forces all 5.
+        let read_seq: Vec<u8> = vec![0, 1, 2, 1, 1];
+
+        // Local: stops at the score peak (3M), soft-clipping the 2 mismatches.
+        let local = extend_alignment(&read_seq, 0, 0, 1, 5, 0, 0, 10, 0.3, &index, false, false);
+        assert_eq!(local.extend_len, 3, "local extension stops at score peak");
+        assert_eq!(local.max_score, 3);
+
+        // EndToEnd: forces all 5 bases; score = 3 matches - 2 mismatches = 1.
+        let e2e = extend_alignment(&read_seq, 0, 0, 1, 5, 0, 0, 10, 0.3, &index, false, true);
+        assert_eq!(e2e.extend_len, 5, "end-to-end forces full read extension");
+        assert_eq!(e2e.max_score, 1);
+        assert_eq!(e2e.n_mismatch, 2);
+    }
+
+    #[test]
+    fn test_extend_to_end_chromosome_boundary_kills() {
+        // Genome: A C G (3 bases, then padding). Read is 5 bases.
+        let genome_seq = vec![0, 1, 2];
+        let index = make_index_with_seq(&genome_seq);
+        let read_seq: Vec<u8> = vec![0, 1, 2, 3, 0];
+
+        // EndToEnd cannot reach the read end without crossing the chr boundary,
+        // so it returns the kill sentinel (extend_len 0, hugely negative score).
+        let e2e = extend_alignment(&read_seq, 0, 0, 1, 5, 0, 0, 10, 0.3, &index, false, true);
+        assert_eq!(e2e.extend_len, 0);
+        assert!(
+            e2e.max_score < -1_000_000,
+            "boundary hit kills the transcript"
+        );
     }
 
     #[test]
@@ -3386,6 +3543,7 @@ mod tests {
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
             out_filter_score_min_over_lread: 0.66,
+            align_ends_type: crate::params::AlignEndsType::default(),
         };
 
         // Left overhang (prev.length) = 3, below min of 5
@@ -3429,6 +3587,7 @@ mod tests {
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
             out_filter_score_min_over_lread: 0.66,
+            align_ends_type: crate::params::AlignEndsType::default(),
         };
 
         // Both overhangs >= 5
