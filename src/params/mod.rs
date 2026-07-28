@@ -709,11 +709,6 @@ pub struct Parameters {
     #[arg(long = "outSAMmode", default_value = "Full")]
     pub out_sam_mode: String,
 
-    /// Order of alignments in the output: `Paired` (default) or
-    /// `PairedKeepInputOrder`.
-    #[arg(long = "outSAMorder", default_value = "Paired")]
-    pub out_sam_order: String,
-
     /// Post-alignment record filter. Only the default (no filtering) is
     /// supported; the added-reference modes need align-time reference
     /// insertion, which this aligner does not do.
@@ -1760,21 +1755,6 @@ impl Parameters {
                 format!(
                     "unknown --outSAMmode '{}'; expected Full, NoQS, or None",
                     params.out_sam_mode
-                ),
-            ));
-        }
-        // Validate --outSAMorder. Both values are already satisfied: the batch
-        // pipeline consumes batches in input order, so alignments come out in
-        // the order their reads went in.
-        if !matches!(
-            params.out_sam_order.as_str(),
-            "Paired" | "PairedKeepInputOrder"
-        ) {
-            return Err(command.error(
-                ErrorKind::InvalidValue,
-                format!(
-                    "unknown --outSAMorder '{}'; expected Paired or PairedKeepInputOrder",
-                    params.out_sam_order
                 ),
             ));
         }

@@ -22,8 +22,7 @@ Sections commonly used: Features, Bug fixes, Other changes.
 ### Features
 
 - **CLI and output parity: SAM/SJ/read-input knobs and the STAR limit
-  surface** — 31 further STAR 2.7.11b parameters, taking the accepted surface
-  from 143/200 to 174/200.
+  surface** — 30 further STAR 2.7.11b parameters. (`--outSAMorder` came from #145.)
 
   - Implemented: `--outSAMmode` (`Full`/`NoQS`/`None`), `--outSJtype None`,
     `--outSJfilterReads Unique`, `--outSAMheaderHD`, `--outSAMheaderPG`,

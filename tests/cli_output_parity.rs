@@ -101,15 +101,6 @@ fn unsupported_modes_are_refused_rather_than_ignored() {
 }
 
 #[test]
-fn out_sam_order_accepts_both_values() {
-    // `run_batch_pipeline` consumes batches in input order, so
-    // PairedKeepInputOrder is already satisfied and both values are honest.
-    assert!(with_reads(&["--outSAMorder", "Paired"]).is_ok());
-    assert!(with_reads(&["--outSAMorder", "PairedKeepInputOrder"]).is_ok());
-    assert!(with_reads(&["--outSAMorder", "Unsorted"]).is_err());
-}
-
-#[test]
 fn inert_limit_knobs_parse_with_stars_defaults() {
     let p = with_reads(&[]).unwrap();
     assert_eq!(p.limit_out_sam_one_read_bytes, 100_000);
