@@ -21,6 +21,31 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Features
 
+- **CLI and output parity: SAM/SJ/read-input knobs and the STAR limit
+  surface** — 31 further STAR 2.7.11b parameters, taking the accepted surface
+  from 143/200 to 174/200.
+
+  - Implemented: `--outSAMmode` (`Full`/`NoQS`/`None`), `--outSJtype None`,
+    `--outSJfilterReads Unique`, `--outSAMheaderHD`, `--outSAMheaderPG`,
+    `--outSAMheaderCommentFile`, `--readFilesPrefix`, `--readNameSeparator`,
+    `--readQualityScoreBase`, `--outQSconversionAdd`.
+  - Refused loudly rather than accepted and ignored:
+    `--outSAMfilter KeepOnlyAddedReferences` / `KeepAllAddedReferences` and
+    `--readFilesType SAM`, both of which need machinery this aligner does not
+    have.
+  - Accepted and documented as output-neutral: the `--limit*` family,
+    `--outTmpDir`, `--outTmpKeep`, `--runDirPerm`, `--genomeFileSizes`,
+    `--outBAMsorting*`, `--readMatesLengthsIn`.
+
+  `tests/parameter_surface.rs` now checks every STAR 2.7.11b parameter name
+  against the CLI, so the coverage figure is machine-checked and surface drift
+  fails a test.
+
+### Bug fixes
+
+- Read names are cut at `--readNameSeparator` (default `/`), as STAR does. A
+  read named `foo/1` was previously emitted as `foo/1` where STAR emits `foo`.
+
 - **STARsolo single-cell quantification (`--soloType`)** — the 10x
   Chromium / plate-based count-matrix pipeline, ported from STAR and
   verified against real STARsolo (#90).
