@@ -1744,6 +1744,100 @@ impl Parameters {
             ));
         }
 
+        // --readFilesPrefix is prepended to every input read path, so apply it
+        // here and let every consumer see the final paths.
+        if !params.read_files_prefix.is_empty() {
+            let prefix = std::path::Path::new(&params.read_files_prefix);
+            for rf in &mut params.read_files_in {
+                *rf = prefix.join(&*rf);
+            }
+        }
+
+        // Validate --outSAMmode.
+        if !matches!(params.out_sam_mode.as_str(), "Full" | "NoQS" | "None") {
+            return Err(command.error(
+                ErrorKind::InvalidValue,
+                format!(
+                    "unknown --outSAMmode '{}'; expected Full, NoQS, or None",
+                    params.out_sam_mode
+                ),
+            ));
+        }
+        // Validate --outSAMorder. Both values are already satisfied: the batch
+        // pipeline consumes batches in input order, so alignments come out in
+        // the order their reads went in.
+        if !matches!(
+            params.out_sam_order.as_str(),
+            "Paired" | "PairedKeepInputOrder"
+        ) {
+            return Err(command.error(
+                ErrorKind::InvalidValue,
+                format!(
+                    "unknown --outSAMorder '{}'; expected Paired or PairedKeepInputOrder",
+                    params.out_sam_order
+                ),
+            ));
+        }
+        // Validate --outSJtype.
+        if !matches!(params.out_sj_type.as_str(), "Standard" | "None") {
+            return Err(command.error(
+                ErrorKind::InvalidValue,
+                format!(
+                    "unknown --outSJtype '{}'; expected Standard or None",
+                    params.out_sj_type
+                ),
+            ));
+        }
+        // Validate --outSJfilterReads.
+        if !matches!(params.out_sj_filter_reads.as_str(), "All" | "Unique") {
+            return Err(command.error(
+                ErrorKind::InvalidValue,
+                format!(
+                    "unknown --outSJfilterReads '{}'; expected All or Unique",
+                    params.out_sj_filter_reads
+                ),
+            ));
+        }
+        // Validate --readQualityScoreBase.
+        if !matches!(params.read_quality_score_base, 0 | 33 | 64) {
+            return Err(command.error(
+                ErrorKind::InvalidValue,
+                format!(
+                    "unsupported --readQualityScoreBase {}; expected 33 or 64",
+                    params.read_quality_score_base
+                ),
+            ));
+        }
+        // --outSAMfilter: the added-reference modes require inserting
+        // --genomeFastaFiles references at alignment time, which this aligner
+        // does not do. Reject them loudly rather than accept and ignore.
+        for f in &params.out_sam_filter {
+            if f.as_str() != "None" {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    format!(
+                        "--outSAMfilter {f} is not supported: it requires inserting \
+                         --genomeFastaFiles references at alignment time"
+                    ),
+                ));
+            }
+        }
+        // --readFilesType: only Fastx is supported. Reading pre-aligned SAM
+        // input is separate work; refuse rather than silently treating a SAM
+        // file as FASTQ.
+        {
+            let kind = params
+                .read_files_type
+                .first()
+                .map_or("Fastx", String::as_str);
+            if kind != "Fastx" {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    format!("--readFilesType {kind} is not supported; expected Fastx"),
+                ));
+            }
+        }
+
         // ── STARsolo validation ─────────────────────────────────────────
         if params.run_mode() == RunMode::AlignReads && params.solo_enabled() {
             // CB_UMI_Complex needs one CB position + whitelist per segment.

@@ -132,11 +132,19 @@ impl SpliceJunctionStats {
             .map(|entry| {
                 let key = entry.key().clone();
                 let counts = entry.value();
+                // `--outSJfilterReads Unique` counts only uniquely-mapping
+                // reads towards the thresholds, so a junction supported solely
+                // by multimappers drops out.
+                let multi = if params.out_sj_filter_reads == "Unique" {
+                    0
+                } else {
+                    counts.multi_count.load(Ordering::Relaxed)
+                };
                 (
                     key,
                     counts.annotated,
                     counts.unique_count.load(Ordering::Relaxed),
-                    counts.multi_count.load(Ordering::Relaxed),
+                    multi,
                     counts.max_overhang.load(Ordering::Relaxed),
                 )
             })
@@ -281,11 +289,19 @@ impl SpliceJunctionStats {
             .map(|entry| {
                 let key = entry.key().clone();
                 let counts = entry.value();
+                // `--outSJfilterReads Unique` counts only uniquely-mapping
+                // reads towards the thresholds, so a junction supported solely
+                // by multimappers drops out.
+                let multi = if params.out_sj_filter_reads == "Unique" {
+                    0
+                } else {
+                    counts.multi_count.load(Ordering::Relaxed)
+                };
                 (
                     key,
                     counts.annotated,
                     counts.unique_count.load(Ordering::Relaxed),
-                    counts.multi_count.load(Ordering::Relaxed),
+                    multi,
                     counts.max_overhang.load(Ordering::Relaxed),
                 )
             })

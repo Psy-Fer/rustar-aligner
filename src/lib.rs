@@ -156,6 +156,31 @@ trait AlignmentWriter: Send {
     }
 }
 
+/// Drops quality strings on the way to the real writer (`--outSAMmode NoQS`).
+///
+/// A decorator rather than a change at every record-building site: the records
+/// are built once and consumed by five different writer types, and only this
+/// flag cares. The clone is paid only when the flag is set.
+struct NoQsWriter(Box<dyn AlignmentWriter>);
+
+impl AlignmentWriter for NoQsWriter {
+    fn write_batch(
+        &mut self,
+        batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error> {
+        let mut stripped: Vec<_> = batch.to_vec();
+        for record in &mut stripped {
+            *record.quality_scores_mut() =
+                noodles::sam::alignment::record_buf::QualityScores::default();
+        }
+        self.0.write_batch(&stripped)
+    }
+
+    fn finish(&mut self) -> Result<(), error::Error> {
+        self.0.finish()
+    }
+}
+
 /// Null writer that discards all output (for two-pass mode pass 1)
 struct NullWriter;
 
@@ -506,7 +531,8 @@ fn run_smartseq(
         match &cell.read2 {
             // Single-end: count reads.
             None => {
-                let mut reader = crate::io::fastq::FastqReader::open(&cell.read1, cmd)?;
+                let mut reader =
+                    crate::io::fastq::FastqReader::open(&cell.read1, cmd)?.with_params(params);
                 loop {
                     let batch = reader.read_batch(10_000)?;
                     if batch.is_empty() {
@@ -539,7 +565,8 @@ fn run_smartseq(
             // Paired-end: align both mates as a fragment, count the fragment once
             // (gene from the union of both mates' overlaps).
             Some(r2) => {
-                let mut reader = crate::io::fastq::PairedFastqReader::open(&cell.read1, r2, cmd)?;
+                let mut reader = crate::io::fastq::PairedFastqReader::open(&cell.read1, r2, cmd)?
+                    .with_params(params);
                 loop {
                     let mut batch = Vec::with_capacity(10_000);
                     while batch.len() < 10_000 {
@@ -674,64 +701,77 @@ fn run_single_pass(
     let out_type = &params.out_sam_type;
 
     // Build boxed writer — stdout takes precedence over file output.
-    let mut writer: Box<dyn AlignmentWriter> = match params.out_std {
-        OutStd::Sam => {
-            info!("Writing SAM to stdout (--outStd SAM)");
-            Box::new(crate::io::sam::SamStdoutWriter::create(
-                &index.genome,
-                params,
-            )?)
-        }
-        OutStd::BamUnsorted => {
-            info!("Writing unsorted BAM to stdout (--outStd BAM_Unsorted)");
-            Box::new(crate::io::bam::BamStdoutWriter::create(
-                &index.genome,
-                params,
-            )?)
-        }
-        OutStd::BamSortedByCoordinate => {
-            info!("Writing coordinate-sorted BAM to stdout (--outStd BAM_SortedByCoordinate)");
-            Box::new(crate::io::bam::SortedBamStdoutWriter::create(
-                &index.genome,
-                params,
-            )?)
-        }
-        OutStd::None => match out_type.format {
-            OutSamFormat::Sam => {
-                let output_path = params.output_path("Aligned.out.sam");
-                info!("Writing SAM to {}", output_path.display());
-                if let Some(parent) = output_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                Box::new(SamWriter::create(&output_path, &index.genome, params)?)
+    // `--outSAMmode None` asks for no alignment output at all; everything else
+    // (SJ.out.tab, Log.final.out, counts) is still produced, so the alignment
+    // is still run and only the records are dropped.
+    let mut writer: Box<dyn AlignmentWriter> = if params.out_sam_mode == "None" {
+        info!("--outSAMmode None: no alignment records will be written");
+        Box::new(NullWriter)
+    } else {
+        match params.out_std {
+            OutStd::Sam => {
+                info!("Writing SAM to stdout (--outStd SAM)");
+                Box::new(crate::io::sam::SamStdoutWriter::create(
+                    &index.genome,
+                    params,
+                )?)
             }
-            OutSamFormat::Bam => {
-                let sorted = out_type.sort_order == Some(OutSamSortOrder::SortedByCoordinate);
-                let output_path = if sorted {
-                    params.output_path("Aligned.sortedByCoord.out.bam")
-                } else {
-                    params.output_path("Aligned.out.bam")
-                };
-                info!("Writing BAM to {}", output_path.display());
-                if let Some(parent) = output_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                if sorted {
-                    Box::new(SortedBamWriter::create(
-                        &output_path,
-                        &index.genome,
-                        params,
-                    )?)
-                } else {
-                    Box::new(BamWriter::create(&output_path, &index.genome, params)?)
-                }
+            OutStd::BamUnsorted => {
+                info!("Writing unsorted BAM to stdout (--outStd BAM_Unsorted)");
+                Box::new(crate::io::bam::BamStdoutWriter::create(
+                    &index.genome,
+                    params,
+                )?)
             }
-            OutSamFormat::None => {
-                info!("--outSAMtype None: skipping alignment output (count/quant only)");
-                Box::new(NullWriter)
+            OutStd::BamSortedByCoordinate => {
+                info!("Writing coordinate-sorted BAM to stdout (--outStd BAM_SortedByCoordinate)");
+                Box::new(crate::io::bam::SortedBamStdoutWriter::create(
+                    &index.genome,
+                    params,
+                )?)
             }
-        },
+            OutStd::None => match out_type.format {
+                OutSamFormat::Sam => {
+                    let output_path = params.output_path("Aligned.out.sam");
+                    info!("Writing SAM to {}", output_path.display());
+                    if let Some(parent) = output_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    Box::new(SamWriter::create(&output_path, &index.genome, params)?)
+                }
+                OutSamFormat::Bam => {
+                    let sorted = out_type.sort_order == Some(OutSamSortOrder::SortedByCoordinate);
+                    let output_path = if sorted {
+                        params.output_path("Aligned.sortedByCoord.out.bam")
+                    } else {
+                        params.output_path("Aligned.out.bam")
+                    };
+                    info!("Writing BAM to {}", output_path.display());
+                    if let Some(parent) = output_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    if sorted {
+                        Box::new(SortedBamWriter::create(
+                            &output_path,
+                            &index.genome,
+                            params,
+                        )?)
+                    } else {
+                        Box::new(BamWriter::create(&output_path, &index.genome, params)?)
+                    }
+                }
+                OutSamFormat::None => {
+                    info!("--outSAMtype None: skipping alignment output (count/quant only)");
+                    Box::new(NullWriter)
+                }
+            },
+        }
     };
+
+    // `--outSAMmode NoQS`: emit records without their quality strings.
+    if params.out_sam_mode == "NoQS" {
+        writer = Box::new(NoQsWriter(writer));
+    }
 
     // Align reads through the boxed writer.
     //
@@ -752,7 +792,8 @@ fn run_single_pass(
             w.finish()?;
         }
         let sj_output_path = params.output_path("SJ.out.tab");
-        if !sj_stats.is_empty() {
+        // `--outSJtype None` suppresses SJ.out.tab entirely.
+        if params.out_sj_type != "None" && !sj_stats.is_empty() {
             sj_stats.write_output(&sj_output_path, &index.genome, params)?;
         }
         // Per-cell count matrices (raw + filtered), Summary.csv, and the SJ
@@ -799,7 +840,8 @@ fn run_single_pass(
 
     // 5. Write SJ.out.tab file
     let sj_output_path = params.output_path("SJ.out.tab");
-    if !sj_stats.is_empty() {
+    // `--outSJtype None` suppresses SJ.out.tab entirely.
+    if params.out_sj_type != "None" && !sj_stats.is_empty() {
         info!(
             "Writing splice junction statistics to {}",
             sj_output_path.display()
@@ -1372,7 +1414,8 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
     let read_file = &params.read_files_in[0];
     info!("Reading single-end from {}", read_file.display());
 
-    let reader = FastqReader::open(read_file, params.read_files_command.as_deref())?;
+    let reader =
+        FastqReader::open(read_file, params.read_files_command.as_deref())?.with_params(params);
 
     // Create chimeric output writer if enabled
     let chimeric_writer = if params.chim_segment_min > 0 && params.chim_out_junctions() {
@@ -2711,7 +2754,8 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
         &params.read_files_in[0],
         &params.read_files_in[1],
         params.read_files_command.as_deref(),
-    )?;
+    )?
+    .with_params(params);
 
     // Create chimeric output writer if enabled
     let chimeric_writer = if params.chim_segment_min > 0 && params.chim_out_junctions() {

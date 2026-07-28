@@ -950,8 +950,35 @@ where
 {
     let mut builder = sam::Header::builder();
 
-    // @HD line (default version and unsorted)
-    builder = builder.set_header(Map::default());
+    // @HD line. `--outSAMheaderHD` replaces it wholesale, given as the
+    // tab-separated fields STAR expects (`@HD VN:1.4 SO:coordinate`).
+    if params.out_sam_header_hd.is_empty() {
+        builder = builder.set_header(Map::default());
+    } else {
+        let mut hd = Map::<sam::header::record::value::map::Header>::default();
+        for field in &params.out_sam_header_hd {
+            let field = field.trim();
+            // STAR takes the leading `@HD` as part of the value list; ignore it.
+            if field.is_empty() || field == "@HD" {
+                continue;
+            }
+            let Some((tag, value)) = field.split_once(':') else {
+                return Err(Error::Parameter(format!(
+                    "--outSAMheaderHD field '{field}' is not TAG:value"
+                )));
+            };
+            if tag.len() != 2 {
+                return Err(Error::Parameter(format!(
+                    "--outSAMheaderHD tag '{tag}' is not two characters"
+                )));
+            }
+            let tag_bytes: [u8; 2] = tag.as_bytes()[..2].try_into().unwrap();
+            let other_tag: HeaderOtherTag<_> = HeaderOtherTag::try_from(tag_bytes)
+                .map_err(|e| Error::Parameter(format!("invalid @HD tag '{tag}': {e}")))?;
+            hd.other_fields_mut().insert(other_tag, value.into());
+        }
+        builder = builder.set_header(hd);
+    }
 
     // @SQ lines for each reference
     for (name, length) in refs {
@@ -1008,6 +1035,51 @@ where
     pg.other_fields_mut()
         .insert(program_tag::COMMAND_LINE, BString::from(cl));
     builder = builder.add_program("rustar-aligner", pg);
+
+    // `--outSAMheaderPG` adds one further @PG line, given the same way.
+    if !params.out_sam_header_pg.is_empty() {
+        let mut extra = Map::<Program>::default();
+        let mut id: Option<String> = None;
+        for field in &params.out_sam_header_pg {
+            let field = field.trim();
+            if field.is_empty() || field == "@PG" {
+                continue;
+            }
+            let Some((tag, value)) = field.split_once(':') else {
+                return Err(Error::Parameter(format!(
+                    "--outSAMheaderPG field '{field}' is not TAG:value"
+                )));
+            };
+            if tag == "ID" {
+                id = Some(value.to_string());
+                continue;
+            }
+            if tag.len() != 2 {
+                return Err(Error::Parameter(format!(
+                    "--outSAMheaderPG tag '{tag}' is not two characters"
+                )));
+            }
+            let tag_bytes: [u8; 2] = tag.as_bytes()[..2].try_into().unwrap();
+            let other_tag: HeaderOtherTag<_> = HeaderOtherTag::try_from(tag_bytes)
+                .map_err(|e| Error::Parameter(format!("invalid @PG tag '{tag}': {e}")))?;
+            extra.other_fields_mut().insert(other_tag, value.into());
+        }
+        let id =
+            id.ok_or_else(|| Error::Parameter("--outSAMheaderPG needs an ID: field".to_string()))?;
+        builder = builder.add_program(id, extra);
+    }
+
+    // `--outSAMheaderCommentFile` contributes one @CO line per line of the
+    // named file. `-` (the default) means no comments.
+    if params.out_sam_header_comment_file != "-" {
+        let path = std::path::Path::new(&params.out_sam_header_comment_file);
+        let contents = std::fs::read_to_string(path).map_err(|e| Error::io(e, path))?;
+        for line in contents.lines() {
+            if !line.is_empty() {
+                builder = builder.add_comment(line);
+            }
+        }
+    }
 
     Ok(builder.build())
 }
