@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 rustar-aligner aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection (including multi-junction Tier 3), gene-level quantification, **single-cell quantification (STARsolo: Gene / GeneFull / SJ / Velocyto features, barcode correction, UMI dedup, EmptyDrops_CR cell calling)**, and multi-threaded parallel processing. Solo count matrices are byte-identical to STARsolo's. 516 tests passing (491 unit + 25 integration), 0 clippy warnings. See [Performance & Benchmarks](#performance--benchmarks) for a native three-way comparison against STARsolo and CellRanger.
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection (including multi-junction Tier 3), gene-level quantification, **single-cell quantification (STARsolo: Gene / GeneFull / SJ / Velocyto features, barcode correction, UMI dedup, EmptyDrops_CR cell calling)**, WASP allele-specific filtering, paired-end mate-overlap merging, coverage-track output, adapter/CellRanger clipping, and multi-threaded parallel processing. Default SAM output is byte-identical to STAR's (`NH HI AS nM` attributes); solo count matrices are byte-identical to STARsolo's. Pure-Rust core with an in-tree deterministic RNG (no `rand` dependency). 578 tests passing (553 unit + 25 integration), 0 clippy warnings. See [Performance & Benchmarks](#performance--benchmarks) for a native three-way comparison against STARsolo and CellRanger.
 
 ## Quick Start
 
@@ -216,14 +216,18 @@ resident; the 16 GB sparse index is stable at ~54 s.</sub>
 - Gene-level read counting (`--quantMode GeneCounts` → `ReadsPerGene.out.tab`)
 - Transcriptome-coordinate SAM output (`--quantMode TranscriptomeSAM`)
 - **Single-cell quantification (STARsolo)** — `--soloType CB_UMI_Simple`, `CB_UMI_Complex` (multi-segment barcodes), and `SmartSeq` (plate-based, SE + PE); features `Gene`, `GeneFull` (pre-mRNA), `SJ`, and `Velocyto` (spliced/unspliced/ambiguous); barcode correction (`--soloCBmatchWLtype` Exact/1MM/1MM_multi/…), UMI dedup (`--soloUMIdedup` 1MM_All/1MM_CR/1MM_Directional/…), multi-gene UMI filtering, multi-mapper resolution (`--soloMultiMappers` Uniform/PropUnique/EM/Rescue), cell calling (`--soloCellFilter` CellRanger2.2/TopCells/EmptyDrops_CR), gzip output, and `Summary.csv` — writes STARsolo-compatible `Solo.out/<feature>/{raw,filtered}/{matrix.mtx, barcodes.tsv, features.tsv}`
+- WASP allele-specific-mapping filter (`--waspOutputMode SAMtag`, `--varVCFfile`) — vW/vA/vG tags, SE + PE
+- Paired-end mate-overlap merging (`--peOverlapNbasesMin`, `--peOverlapMMp`)
+- Coverage-track output (`--outWigType bedGraph` → `Signal.{Unique,UniqueMultiple}.str{1,2}.out.bg`)
+- Adapter and fixed clipping (`--clip5pNbases`, `--clip3pNbases`, `--clip3pAdapterSeq`, `--clipAdapterType` including CellRanger4 TSO + poly-A) — clipped bases soft-clipped in SAM, matching STAR's convention
 - Sparse suffix array (`--genomeSAsparseD`) for reduced index memory
 - Post-alignment read filtering (`--outFilterType BySJout`)
 - Splice junction output (`SJ.out.tab`)
 - Unmapped read output to FASTQ (`--outReadsUnmapped Fastx` → `Unmapped.out.mate1` / `mate2`)
 - Gzip-compressed FASTQ input (`--readFilesCommand zcat`)
 - Read group tags (`--outSAMattrRGline`)
-- Seeded RNG for reproducible tie-breaking (`--runRNGseed`)
-- SAM optional tags: NH, HI, AS, NM, nM, XS, jM, jI, MD
+- Deterministic in-tree RNG for reproducible tie-breaking (`--runRNGseed`; no `rand` dependency)
+- SAM optional tags: NH, HI, AS, nM, NM, XS, jM, jI, MD (default `NH HI AS nM` matches STAR; `NM` opt-in)
 - `--outSAMattributes` control (Standard/All/None/explicit list)
 - SECONDARY flag (0x100) on multi-mapper alignments
 - Configurable output limits (`--outSAMmultNmax`)
