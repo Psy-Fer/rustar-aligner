@@ -111,6 +111,16 @@ pub enum UmiFiltering {
     /// Remove lower-count gene assignments of a multi-gene UMI; if every gene
     /// has a single read, drop the UMI entirely (STAR `MultiGeneUMI`).
     MultiGeneUmi,
+    /// `MultiGeneUMI_All`: a UMI seen in more than one gene is removed from
+    /// *all* of them, rather than from the losers only.
+    ///
+    /// This is a deliberate divergence from STAR 2.7.11b, tracked in #144.
+    /// There the option is a no-op — its consumption site tests only the
+    /// `MultiGeneUMI` flag — so selecting it leaves the filter entirely off.
+    /// Reproducing that would ship a flag that silently does nothing;
+    /// implementing what it is documented to do is the lesser evil, and the
+    /// behaviour is asserted rather than inherited.
+    MultiGeneUmiAll,
     /// CellRanger > 3.0 variant: keep only the highest-read-count gene for a
     /// multi-gene UMI (ties retained), without the all-singletons drop.
     MultiGeneUmiCr,
@@ -121,8 +131,8 @@ impl FromStr for UmiFiltering {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "-" | "None" => Ok(Self::None),
-            // MultiGeneUMI_All behaves like MultiGeneUMI for the count matrix.
-            "MultiGeneUMI" | "MultiGeneUMI_All" => Ok(Self::MultiGeneUmi),
+            "MultiGeneUMI" => Ok(Self::MultiGeneUmi),
+            "MultiGeneUMI_All" => Ok(Self::MultiGeneUmiAll),
             "MultiGeneUMI_CR" => Ok(Self::MultiGeneUmiCr),
             _ => Err(format!(
                 "unknown soloUMIfiltering '{s}'; expected -, None, MultiGeneUMI, MultiGeneUMI_CR, or MultiGeneUMI_All"
@@ -924,6 +934,11 @@ fn filter_multi_gene_umi(genes: &HashMap<u32, u32>, filtering: UmiFiltering) -> 
             let thresh = if max == 1 { 2 } else { max };
             genes.iter().filter(|&(_, &rc)| rc >= thresh).collect()
         }
+        // A UMI that appears in more than one gene is evidence of a collision
+        // or of chimeric amplification, so it is discarded outright rather than
+        // attributed to whichever gene happened to read deepest. `genes.len()`
+        // is already known to be > 1 here.
+        UmiFiltering::MultiGeneUmiAll => Vec::new(),
         // CellRanger: the gene with the strictly highest read count takes the
         // UMI, and a tie gives it to nobody.
         //
@@ -2593,5 +2608,58 @@ mod tests {
         assert_eq!(resolve_multi_cb(&cands, &[0, 0], 0.0), None);
         // Pseudocount gives every candidate positive weight → argmax accepted.
         assert!(resolve_multi_cb(&cands, &[0, 0], 1.0).is_some());
+    }
+
+    #[test]
+    fn multigene_umi_all_drops_the_umi_from_every_gene() {
+        // A UMI seen in two genes, one of them far better supported.
+        let mut cross: HashMap<u32, u32> = HashMap::default();
+        cross.insert(7, 10);
+        cross.insert(9, 1);
+
+        // MultiGeneUMI keeps the winner.
+        let kept = filter_multi_gene_umi(&cross, UmiFiltering::MultiGeneUmi);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(*kept[0].0, 7);
+
+        // MultiGeneUMI_CR likewise.
+        assert_eq!(
+            filter_multi_gene_umi(&cross, UmiFiltering::MultiGeneUmiCr).len(),
+            1
+        );
+
+        // MultiGeneUMI_All discards it from both: a UMI in two genes is
+        // evidence of a collision, not of the deeper gene.
+        assert!(filter_multi_gene_umi(&cross, UmiFiltering::MultiGeneUmiAll).is_empty());
+
+        // A single-gene UMI is untouched by every mode, including _All.
+        let mut single: HashMap<u32, u32> = HashMap::default();
+        single.insert(7, 3);
+        for mode in [
+            UmiFiltering::None,
+            UmiFiltering::MultiGeneUmi,
+            UmiFiltering::MultiGeneUmiCr,
+            UmiFiltering::MultiGeneUmiAll,
+        ] {
+            assert_eq!(
+                filter_multi_gene_umi(&single, mode).len(),
+                1,
+                "{mode:?} must not touch a single-gene UMI"
+            );
+        }
+    }
+
+    #[test]
+    fn multigene_umi_all_parses_to_its_own_variant() {
+        // It used to alias to MultiGeneUMI, which was neither STAR's behaviour
+        // (a no-op) nor the documented one.
+        assert_eq!(
+            "MultiGeneUMI_All".parse::<UmiFiltering>().unwrap(),
+            UmiFiltering::MultiGeneUmiAll
+        );
+        assert_eq!(
+            "MultiGeneUMI".parse::<UmiFiltering>().unwrap(),
+            UmiFiltering::MultiGeneUmi
+        );
     }
 }
