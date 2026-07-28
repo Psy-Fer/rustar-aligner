@@ -393,7 +393,10 @@ const TSO_SEQ: &[u8] = b"AAGCAGTGGTATCAACGCAGAGTACATGGG";
 ///
 /// Conservative thresholds (full-length TSO match ≤ 3 mismatches at the 5'
 /// anchor; trailing polyA run ≥ 8) keep this a no-op on adapter-free reads.
-pub fn clip_adapter_cr4(seq: &[u8], qual: &[u8]) -> (Vec<u8>, Vec<u8>) {
+/// Returns `(clipped_seq, clipped_qual, clip5p, clip3p)` — the CR4-clipped read plus
+/// the bases trimmed from the 5' (TSO) and 3' (polyA) ends, so the caller can soft-clip
+/// them (STARsolo keeps them in SEQ as soft-clips, e.g. `60M30S`, not dropped).
+pub fn clip_adapter_cr4(seq: &[u8], qual: &[u8]) -> (Vec<u8>, Vec<u8>, usize, usize) {
     let mut start = 0usize;
     let mut end = seq.len();
 
@@ -424,13 +427,15 @@ pub fn clip_adapter_cr4(seq: &[u8], qual: &[u8]) -> (Vec<u8>, Vec<u8>) {
     }
 
     if start == 0 && end == seq.len() {
-        return (seq.to_vec(), qual.to_vec());
+        return (seq.to_vec(), qual.to_vec(), 0, 0);
     }
     (
         seq[start..end].to_vec(),
         qual.get(start..end.min(qual.len()))
             .map(<[u8]>::to_vec)
             .unwrap_or_default(),
+        start,
+        seq.len() - end,
     )
 }
 

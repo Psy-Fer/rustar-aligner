@@ -2154,13 +2154,17 @@ fn align_reads_solo<W: AlignmentWriter + ?Sized>(
                                 };
                             // CellRanger4 adapter clipping (TSO 5' + polyA 3') runs before
                             // the fixed clip5p/clip3p Nbases trimming.
-                            let (cr_seq, cr_qual) = if cr4_clip {
+                            let (cr_seq, cr_qual, cr4_5p, cr4_3p) = if cr4_clip {
                                 crate::solo::clip_adapter_cr4(&read.sequence, &read.quality)
                             } else {
-                                (read.sequence.clone(), read.quality.clone())
+                                (read.sequence.clone(), read.quality.clone(), 0, 0)
                             };
                             let (clipped_seq, clipped_qual) =
                                 clip_read(&cr_seq, &cr_qual, clip5p, clip3p);
+                            // Total clip against the ORIGINAL read = CR4 (TSO/polyA) + fixed
+                            // Nbases; used to soft-clip all trimmed bases (STARsolo convention).
+                            let total_clip5p = cr4_5p + clip5p;
+                            let total_clip3p = cr4_3p + clip3p;
                             let mut buffer = BufferedSamRecords::new();
                             stats.record_read_bases(clipped_seq.len() as u64);
 
@@ -2234,15 +2238,15 @@ fn align_reads_solo<W: AlignmentWriter + ?Sized>(
                                         buffer.push(record);
                                     }
                                 } else if transcripts.len() <= max_multimaps {
-                                    // Soft-clip the fixed clip5p/clip3p against the post-CR4
-                                    // read (cr_seq), matching SE/PE. Default 10x has clip=0 so
-                                    // this is inert; the CR4 TSO/polyA bases stay dropped.
+                                    // Soft-clip ALL trimmed bases (CR4 TSO/polyA + fixed
+                                    // clip5p/clip3p) against the original read, matching
+                                    // STARsolo (e.g. 60M30S). Inert at default 10x.
                                     let mut records = SamWriter::build_alignment_records(
                                         &out_read_name,
-                                        &cr_seq,
-                                        &cr_qual,
-                                        clip5p,
-                                        clip3p,
+                                        &read.sequence,
+                                        &read.quality,
+                                        total_clip5p,
+                                        total_clip3p,
                                         &transcripts,
                                         &index.genome,
                                         params,
