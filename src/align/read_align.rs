@@ -401,18 +401,6 @@ pub fn align_read(
         transcripts.retain(|t| t.score >= score_threshold);
     }
 
-    // Multimap count check: too many loci → unmapped.
-    if transcripts.len() > params.out_filter_multimap_nmax as usize {
-        let n_loci = transcripts.len();
-        transcripts.clear();
-        return Ok((
-            transcripts,
-            chimeric_alignments,
-            n_loci,
-            Some(UnmappedReason::TooManyLoci),
-        ));
-    }
-
     // Step 4: Quality filters (STAR's mappedFilter — runs after score-range selection).
     // STAR uses (Lread-1) for relative thresholds and casts to integer
     // (ReadAlign_mappedFilter.cpp lines 8-9)
@@ -644,6 +632,12 @@ pub fn align_read(
         }
     }
 
+    // STAR's mappedFilter (ReadAlign_mappedFilter.cpp) classifies the read by its
+    // BEST transcript, in strict order: too-short (score/match) → too-many-mismatches
+    // → too-many-loci → mapped. Crucially, `multi` (too many loci) is reached ONLY
+    // when the best alignment PASSES the score/match/mismatch gates. We mirror that:
+    // if the quality filter emptied the set, the best transcript failed → classify
+    // short/mismatch; otherwise, if too many loci survive, it's multi; else mapped.
     let unmapped_reason = if transcripts.is_empty() {
         let has_mismatch = filter_reasons.contains_key("mismatch_max")
             || filter_reasons.contains_key("mismatch_rate");
@@ -655,6 +649,11 @@ pub fn align_read(
         } else {
             Some(UnmappedReason::TooShort)
         }
+    } else if transcripts.len() > params.out_filter_multimap_nmax as usize {
+        // Best alignment passed quality, but too many loci → STAR unmapType=3.
+        // `n_for_mapq` already holds this count (computed above); drop the alignments.
+        transcripts.clear();
+        Some(UnmappedReason::TooManyLoci)
     } else {
         None
     };
@@ -1146,17 +1145,6 @@ pub fn align_paired_read(
         joint_pairs.retain(|pa| pa.combined_wt_score >= score_threshold);
     }
 
-    // Step 3: TooManyLoci check (post-dedup, matching STAR's ordering: multMapSelect → dedup → TooManyLoci).
-    if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
-        let n_loci = joint_pairs.len();
-        return Ok((
-            Vec::new(),
-            pe_chimeric,
-            n_loci,
-            Some(UnmappedReason::TooManyLoci),
-        ));
-    }
-
     // Deterministic primary tie-break (combined score, then a fixed positional
     // order on mate1).
     joint_pairs.sort_by(|a, b| {
@@ -1189,6 +1177,20 @@ pub fn align_paired_read(
 
     // Step 4: quality filter (mappedFilter).
     filter_paired_transcripts(&mut joint_pairs, params);
+
+    // Step 5: too-many-loci — STAR checks `multi` AFTER mappedFilter, only when the
+    // best pair passes the score/match/mismatch gates (ReadAlign_mappedFilter.cpp).
+    // Pairs that survive quality but exceed outFilterMultimapNmax → too many loci;
+    // a read whose best pair fails quality was already emptied above (→ unmapped).
+    if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
+        let n_loci = joint_pairs.len();
+        return Ok((
+            Vec::new(),
+            pe_chimeric,
+            n_loci,
+            Some(UnmappedReason::TooManyLoci),
+        ));
+    }
 
     // PE Tier 1: chimericDetectionOld per-mate — mirrors SE behavior but run independently
     // on each mate's transcript pool (joint-pair halves + single-mate WTs combined).
