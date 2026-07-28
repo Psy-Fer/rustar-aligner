@@ -310,7 +310,8 @@ mod tests {
     fn test_extract_junctions_single_transcript() {
         // Create a simple genome
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,
@@ -362,7 +363,8 @@ mod tests {
     #[test]
     fn test_extract_junctions_multiple_transcripts() {
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,
@@ -438,7 +440,8 @@ mod tests {
     #[test]
     fn test_extract_junctions_single_exon_transcript() {
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,
@@ -470,7 +473,8 @@ mod tests {
     #[test]
     fn test_extract_junctions_unknown_chromosome() {
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,
@@ -517,7 +521,8 @@ mod tests {
     #[test]
     fn test_junction_coordinate_calculation() {
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,
@@ -601,7 +606,8 @@ mod tests {
     #[test]
     fn test_extract_junctions_configured_custom_transcript_tag() {
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,

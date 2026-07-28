@@ -1,4 +1,5 @@
 pub mod fasta;
+pub mod transform;
 
 use std::path::Path;
 
@@ -10,6 +11,102 @@ use fasta::parse_fasta_files;
 /// STAR's genome spacing character (used for inter-chromosome padding).
 const GENOME_SPACING_CHAR: u8 = 5;
 
+/// Backing storage for a genome's `[forward | reverse-complement]` sequence.
+///
+/// `Owned` is the full `2*n_genome` byte buffer built at genomeGenerate time
+/// (it is the only variant that supports slicing/mutation). `Mapped` is a
+/// read-only memory map of the on-disk `Genome` file, which holds **only the
+/// forward strand** (`n_genome` bytes): the reverse-complement half is computed
+/// on access in [`GenomeSeq::base`], so loading never materializes the ~`n`-byte
+/// RC buffer and the forward bytes are reclaimable file-backed pages rather than
+/// an anonymous `Vec`. `Arc<Mmap>` keeps `Genome::clone` (two-pass) cheap.
+#[derive(Clone)]
+pub enum GenomeSeq {
+    Owned(Vec<u8>),
+    Mapped {
+        fwd: std::sync::Arc<memmap2::Mmap>,
+        n_genome: usize,
+    },
+}
+
+impl GenomeSeq {
+    /// Base at absolute position `i` — forward `[0, n_genome)` or
+    /// reverse-complement `[n_genome, 2*n_genome)`. For the `Mapped` RC half,
+    /// `base(i) = complement(forward[2*n_genome - 1 - i])`, exactly the bytes
+    /// the owned builder writes into the second half.
+    #[inline]
+    pub fn base(&self, i: usize) -> u8 {
+        match self {
+            GenomeSeq::Owned(v) => v[i],
+            GenomeSeq::Mapped { fwd, n_genome } => {
+                let n = *n_genome;
+                if i < n {
+                    fwd[i]
+                } else {
+                    let f = fwd[2 * n - 1 - i];
+                    if f < 4 { 3 - f } else { f }
+                }
+            }
+        }
+    }
+
+    /// Total sequence length (`2*n_genome` — forward + reverse complement).
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            GenomeSeq::Owned(v) => v.len(),
+            GenomeSeq::Mapped { n_genome, .. } => 2 * n_genome,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Bounds-checked [`base`](Self::base): the base at `i`, or `None` if out of
+    /// range.
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<u8> {
+        if i < self.len() {
+            Some(self.base(i))
+        } else {
+            None
+        }
+    }
+
+    /// The contiguous byte buffer. For `Owned` this is the full
+    /// `[forward | RC]`; for `Mapped` it is the forward strand only — callers
+    /// that may touch the RC half must use [`base`](Self::base). Used at build
+    /// time (always `Owned`) for SA construction and the on-disk write.
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            GenomeSeq::Owned(v) => v,
+            GenomeSeq::Mapped { fwd, .. } => fwd,
+        }
+    }
+}
+
+impl From<Vec<u8>> for GenomeSeq {
+    fn from(v: Vec<u8>) -> Self {
+        GenomeSeq::Owned(v)
+    }
+}
+
+// `memmap2::Mmap` is neither `Debug` nor `PartialEq`, so derive them by hand via
+// the byte view. `as_slice()` is the full buffer for `Owned` (the only variant
+// tests construct), so equality/printing behave like the old `Vec<u8>` field.
+impl std::fmt::Debug for GenomeSeq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GenomeSeq({} bytes)", self.len())
+    }
+}
+
+impl PartialEq for GenomeSeq {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
 /// Packed genome with chromosome metadata.
 ///
 /// The genome sequence is stored as one byte per base:
@@ -19,8 +116,9 @@ const GENOME_SPACING_CHAR: u8 = 5;
 #[derive(Clone)]
 pub struct Genome {
     /// Forward genome (0..n_genome) + reverse complement (n_genome..2*n_genome).
-    /// Initialized to GENOME_SPACING_CHAR (5), then overwritten with actual bases.
-    pub sequence: Vec<u8>,
+    /// Owned at build time; a memory map of the forward strand (RC computed on
+    /// access) when loaded from disk. Access bases via [`GenomeSeq::base`].
+    pub sequence: GenomeSeq,
 
     /// Total length of the forward (padded) genome.
     pub n_genome: u64,
@@ -43,6 +141,32 @@ pub struct Genome {
     /// Padded start positions of each chromosome in the genome.
     /// Length = n_chr_real + 1; the last entry is n_genome (total size).
     pub chr_start: Vec<u64>,
+
+    /// `--genomeTransformType Haploid`/`Diploid` block map (`[orig_start, length, new_start]`,
+    /// forward-genome coordinates), `None` unless a transform was applied. Written
+    /// to `transformGenomeBlocks.tsv` by [`write_index_files`](Self::write_index_files).
+    pub transform_blocks: Option<Vec<[u64; 3]>>,
+}
+
+/// Compute STAR's bin-padded chromosome start offsets: `chr_start[i]` is chromosome
+/// `i`'s 0-based start in the padded forward genome; the trailing `chr_start[n]` is
+/// the total padded (forward) genome size. Shared by [`Genome::from_fasta`] and
+/// [`transform`] (which must reproduce the same padding independently, once over
+/// the original chromosome lengths and once over the transformed ones).
+pub(crate) fn compute_chr_starts(chr_lengths: &[u64], chr_bin_nbits: u32) -> Vec<u64> {
+    let bin_size = 1u64 << chr_bin_nbits;
+    let mut chr_start = Vec::with_capacity(chr_lengths.len() + 1);
+    let mut n: u64 = 0;
+    for &len in chr_lengths {
+        if n > 0 {
+            n = ((n + 1) / bin_size + 1) * bin_size;
+        }
+        chr_start.push(n);
+        n += len;
+    }
+    n = ((n + 1) / bin_size + 1) * bin_size;
+    chr_start.push(n);
+    chr_start
 }
 
 impl Genome {
@@ -54,46 +178,58 @@ impl Genome {
     /// # Returns
     /// A `Genome` with forward + reverse complement sequences and metadata.
     pub fn from_fasta(params: &Parameters) -> Result<Self, Error> {
-        let chromosomes = parse_fasta_files(&params.genome_fasta_files)?;
-
-        // Compute padding bin size
+        let mut chromosomes = parse_fasta_files(&params.genome_fasta_files)?;
         let bin_nbits = params.genome_chr_bin_nbits;
-        let bin_size = 1u64 << bin_nbits;
 
-        // First pass: compute padded positions and total genome size
+        // --genomeTransformType Haploid: substitute the VCF alleles into the
+        // chromosome sequences before padding/SA build. Indels shift lengths;
+        // Genome::from_fasta's own padding pass (below) re-derives chr_start
+        // from the (now transformed) chromosome lengths, so it automatically
+        // matches the block map's `new_start` globalization in `transform`.
+        let transform_blocks = if params.genome_transform_type.eq_ignore_ascii_case("Haploid") {
+            let vcf_path = params
+                .genome_transform_vcf
+                .as_ref()
+                .expect("validated: Haploid requires --genomeTransformVCF");
+            let vcf_text = std::fs::read_to_string(vcf_path).map_err(|e| Error::io(e, vcf_path))?;
+            let chr_name: Vec<String> = chromosomes.iter().map(|c| c.name.clone()).collect();
+            let variants = transform::parse_vcf_haploid(&vcf_text, &chr_name);
+            let transformed = transform::transform_chromosomes(&chromosomes, &variants, bin_nbits);
+            chromosomes = transformed.chromosomes;
+            Some(transformed.blocks)
+        } else if params.genome_transform_type.eq_ignore_ascii_case("Diploid") {
+            let vcf_path = params
+                .genome_transform_vcf
+                .as_ref()
+                .expect("validated: Diploid requires --genomeTransformVCF");
+            let vcf_text = std::fs::read_to_string(vcf_path).map_err(|e| Error::io(e, vcf_path))?;
+            let chr_name: Vec<String> = chromosomes.iter().map(|c| c.name.clone()).collect();
+            let variants = transform::parse_vcf_diploid(&vcf_text, &chr_name);
+            let transformed =
+                transform::transform_genome_diploid(&chromosomes, &variants, bin_nbits);
+            chromosomes = transformed.chromosomes;
+            Some(transformed.blocks)
+        } else {
+            None
+        };
+
+        // First pass: chromosome names/lengths, validating non-zero length.
         let mut chr_name = Vec::new();
         let mut chr_length = Vec::new();
-        let mut chr_start = Vec::new();
-
-        let mut n: u64 = 0; // current position in the padded genome
-
         for chrom in &chromosomes {
             let len = chrom.sequence.len() as u64;
-
             if len == 0 {
                 return Err(Error::Fasta(format!(
                     "chromosome '{}' has zero length",
                     chrom.name
                 )));
             }
-
-            // Apply STAR's padding formula before this chromosome (except for the first)
-            if n > 0 {
-                n = ((n + 1) / bin_size + 1) * bin_size;
-            }
-
             chr_name.push(chrom.name.clone());
             chr_length.push(len);
-            chr_start.push(n);
-
-            n += len;
         }
 
-        // Final padding after the last chromosome
-        n = ((n + 1) / bin_size + 1) * bin_size;
-        let n_genome = n;
-        chr_start.push(n_genome); // STAR adds this extra entry
-
+        let chr_start = compute_chr_starts(&chr_length, bin_nbits);
+        let n_genome = *chr_start.last().unwrap();
         let n_chr_real = chromosomes.len();
 
         // Allocate buffer: forward (0..n_genome) + reverse (n_genome..2*n_genome)
@@ -115,13 +251,14 @@ impl Genome {
         }
 
         Ok(Genome {
-            sequence,
+            sequence: sequence.into(),
             n_genome,
             n_genome_real: n_genome,
             n_chr_real,
             chr_name,
             chr_length,
             chr_start,
+            transform_blocks,
         })
     }
 
@@ -141,7 +278,7 @@ impl Genome {
         let new_n = old_n + gsj.len() as u64;
 
         let mut new_seq = vec![GENOME_SPACING_CHAR; (new_n * 2) as usize];
-        new_seq[..old_n as usize].copy_from_slice(&self.sequence[..old_n as usize]);
+        new_seq[..old_n as usize].copy_from_slice(&self.sequence.as_slice()[..old_n as usize]);
         new_seq[old_n as usize..new_n as usize].copy_from_slice(gsj);
 
         // Rebuild RC over the extended forward range (STAR stores Gsj_RC
@@ -152,7 +289,7 @@ impl Genome {
             new_seq[2 * new_n as usize - 1 - i] = complement;
         }
 
-        self.sequence = new_seq;
+        self.sequence = new_seq.into();
         self.n_genome = new_n;
     }
 
@@ -163,9 +300,14 @@ impl Genome {
     ///
     /// # Returns
     /// The base value (0-3 for ACGT, 4 for N, 5 for padding), or None if out of bounds.
+    ///
+    /// `#[inline]`: called per-byte in the hottest loops (`extend_alignment`'s DP
+    /// scan, `cluster_seeds`) — uninlined, this is a real function-call boundary on
+    /// every base, unlike STAR's plain `G[i]` array indexing it stands in for.
+    #[inline]
     pub fn get_base(&self, pos: u64) -> Option<u8> {
         if pos < self.sequence.len() as u64 {
-            Some(self.sequence[pos as usize])
+            Some(self.sequence.base(pos as usize))
         } else {
             None
         }
@@ -210,8 +352,11 @@ impl Genome {
 
         // Write Genome file (forward strand only, n_genome bytes)
         let genome_path = dir.join("Genome");
-        fs::write(&genome_path, &self.sequence[..self.n_genome as usize])
-            .map_err(|e| Error::io(e, &genome_path))?;
+        fs::write(
+            &genome_path,
+            &self.sequence.as_slice()[..self.n_genome as usize],
+        )
+        .map_err(|e| Error::io(e, &genome_path))?;
 
         // Write chrName.txt
         let chr_name_path = dir.join("chrName.txt");
@@ -249,6 +394,13 @@ impl Genome {
         // keys via `<<` streaming; the leading `###` comment lines are
         // skipped.
         self.write_genome_parameters_txt(dir, params)?;
+
+        // --genomeTransformType Haploid: the block map for reverse conversion.
+        if let Some(blocks) = &self.transform_blocks {
+            let blocks_path = dir.join("transformGenomeBlocks.tsv");
+            fs::write(&blocks_path, transform::blocks_to_tsv(blocks))
+                .map_err(|e| Error::io(e, &blocks_path))?;
+        }
 
         Ok(())
     }
@@ -443,19 +595,19 @@ mod tests {
         let n = genome.n_genome as usize;
 
         // Forward: A C G T N (then padding)
-        assert_eq!(genome.sequence[0], 0); // A
-        assert_eq!(genome.sequence[1], 1); // C
-        assert_eq!(genome.sequence[2], 2); // G
-        assert_eq!(genome.sequence[3], 3); // T
-        assert_eq!(genome.sequence[4], 4); // N
+        assert_eq!(genome.sequence.base(0), 0); // A
+        assert_eq!(genome.sequence.base(1), 1); // C
+        assert_eq!(genome.sequence.base(2), 2); // G
+        assert_eq!(genome.sequence.base(3), 3); // T
+        assert_eq!(genome.sequence.base(4), 4); // N
 
         // Reverse complement should be at positions [2n-1, 2n-2, 2n-3, 2n-4, 2n-5]
         // which maps to the reverse of [0,1,2,3,4]
-        assert_eq!(genome.sequence[2 * n - 1], 3); // T (complement of A at pos 0)
-        assert_eq!(genome.sequence[2 * n - 1 - 1], 2); // G (complement of C at pos 1)
-        assert_eq!(genome.sequence[2 * n - 1 - 2], 1); // C (complement of G at pos 2)
-        assert_eq!(genome.sequence[2 * n - 1 - 3], 0); // A (complement of T at pos 3)
-        assert_eq!(genome.sequence[2 * n - 1 - 4], 4); // N (complement of N at pos 4)
+        assert_eq!(genome.sequence.base(2 * n - 1), 3); // T (complement of A at pos 0)
+        assert_eq!(genome.sequence.base(2 * n - 1 - 1), 2); // G (complement of C at pos 1)
+        assert_eq!(genome.sequence.base(2 * n - 1 - 2), 1); // C (complement of G at pos 2)
+        assert_eq!(genome.sequence.base(2 * n - 1 - 3), 0); // A (complement of T at pos 3)
+        assert_eq!(genome.sequence.base(2 * n - 1 - 4), 4); // N (complement of N at pos 4)
     }
 
     #[test]
@@ -509,13 +661,13 @@ mod tests {
         assert_eq!(genome.n_chr_real, 1);
 
         // Forward is [real 0..8 | gsj 8..13].
-        assert_eq!(&genome.sequence[..4], &[0, 1, 2, 3]);
-        assert_eq!(&genome.sequence[8..13], gsj.as_slice());
+        assert_eq!(&genome.sequence.as_slice()[..4], &[0, 1, 2, 3]);
+        assert_eq!(&genome.sequence.as_slice()[8..13], gsj.as_slice());
 
         // RC over the extended forward range. sequence[2n-1-i] = complement(sequence[i]).
         let new_n = genome.n_genome as usize;
-        assert_eq!(genome.sequence[2 * new_n - 1 - 8], 3); // complement of A at fwd[8]=0
-        assert_eq!(genome.sequence[2 * new_n - 1 - 12], 5); // spacer stays 5
+        assert_eq!(genome.sequence.base(2 * new_n - 1 - 8), 3); // complement of A at fwd[8]=0
+        assert_eq!(genome.sequence.base(2 * new_n - 1 - 12), 5); // spacer stays 5
         assert_eq!(genome.sequence.len(), 2 * new_n);
     }
 

@@ -47,6 +47,7 @@ src/
   genome/
     mod.rs         -- Genome struct, padding logic, reverse complement, file writing
     fasta.rs       -- FASTA parser, base encoding (A=0,C=1,G=2,T=3,N=4)
+    transform.rs   -- --genomeTransformType Haploid VCF-allele substitution (genomeGenerate-time only)
   index/
     mod.rs         -- GenomeIndex (build + load + write)
     packed_array.rs-- Variable-width bit packing (1-64 bits per element)
@@ -77,6 +78,10 @@ src/
     segment.rs     -- ChimericSegment and ChimericAlignment data structures
     score.rs       -- Junction type classification, repeat length calculation
     output.rs      -- Chimeric.out.junction writer (14-column format)
+  clip/
+    mod.rs         -- Adapter-aware clipping (--clip{5,3}pNbases + Hamming --clip3pAdapterSeq/*MMp/*AfterAdapterNbases)
+  wasp/
+    mod.rs         -- WASP allele-specific-mapping filter (--waspOutputMode SAMtag, --varVCFfile), SE + PE
 ```
 
 ## Development Philosophy — Match STAR Exactly

@@ -66,7 +66,7 @@ impl GenomeIndex {
         } = Self::build_prep(params)?;
 
         log::info!("Building suffix array...");
-        let suffix_array = SuffixArray::build(&genome)?;
+        let suffix_array = SuffixArray::build_sparse(&genome, params.genome_sa_sparse_d as u64)?;
         log::info!("Suffix array built: {} entries", suffix_array.len());
 
         log::info!("Building SA index...");
@@ -160,8 +160,11 @@ impl GenomeIndex {
         let mut sa_writer = PackedStreamWriter::new(sa_buf, word_length);
 
         log::info!("Building suffix array...");
-        let (got_gbit, got_gmask, n_entries) =
-            sa_build::build_streaming(&genome, params.temp_dir.as_deref(), |packed_value| {
+        let (got_gbit, got_gmask, n_entries) = sa_build::build_streaming(
+            &genome,
+            params.temp_dir.as_deref(),
+            params.genome_sa_sparse_d as u64,
+            |packed_value| {
                 // Emit is now lightweight: just bit-pack into the SA
                 // file. caps-sa's phase-4 emit loop is single-threaded,
                 // so anything we do here serialises the whole build.
@@ -171,7 +174,8 @@ impl GenomeIndex {
                     .write_one(packed_value)
                     .map_err(|e| Error::io(e, &sa_path))?;
                 Ok(())
-            })?;
+            },
+        )?;
         debug_assert_eq!(got_gbit, gstrand_bit);
         debug_assert_eq!(got_gmask, gstrand_mask);
         log::info!("Suffix array streamed to disk: {n_entries} entries");
@@ -273,11 +277,12 @@ impl GenomeIndex {
         // preparation + Gsj append must happen BEFORE the suffix array is
         // built, because STAR indexes the flanking-sequence buffer alongside
         // the real genome in a single SA (`sjdbBuildIndex.cpp:293`).
-        let (junction_db, transcriptome, prepared_junctions) = if let Some(ref gtf_path) =
-            params.sjdb_gtf_file
-        {
-            let n_genome_real = genome.n_genome;
+        let n_genome_real = genome.n_genome;
 
+        let mut raw: Vec<(usize, u64, u64, u8)> = Vec::new();
+        let mut transcriptome = None;
+
+        if let Some(ref gtf_path) = params.sjdb_gtf_file {
             let exons = crate::junction::gtf::parse_gtf_configured(
                 gtf_path,
                 &params.sjdb_gtf_feature_exon,
@@ -290,6 +295,8 @@ impl GenomeIndex {
                 &genome,
                 &params.sjdb_gtf_tag_exon_parent_transcript,
                 &params.sjdb_gtf_tag_exon_parent_gene,
+                &params.sjdb_gtf_tag_exon_parent_gene_name,
+                &params.sjdb_gtf_tag_exon_parent_gene_type,
             )?;
             log::info!(
                 "Transcriptome index built from GTF: {} transcripts, {} genes",
@@ -297,12 +304,29 @@ impl GenomeIndex {
                 tr.gene_ids.len()
             );
 
-            let raw = crate::junction::gtf::extract_junctions_configured(
+            let gtf_raw = crate::junction::gtf::extract_junctions_configured(
                 exons,
                 &genome,
                 &params.sjdb_gtf_tag_exon_parent_transcript,
             )?;
-            log::info!("Extracted {} annotated junctions from GTF", raw.len());
+            log::info!("Extracted {} annotated junctions from GTF", gtf_raw.len());
+            raw.extend(gtf_raw);
+            transcriptome = Some(tr);
+        }
+
+        if !params.sjdb_file_chr_start_end.is_empty() {
+            let extra = crate::junction::chr_start_end::parse_sjdb_chr_start_end(
+                &params.sjdb_file_chr_start_end,
+                &genome,
+            )?;
+            log::info!(
+                "Parsed {} junctions from --sjdbFileChrStartEnd",
+                extra.len()
+            );
+            raw.extend(extra);
+        }
+
+        let (junction_db, prepared_junctions) = if !raw.is_empty() {
             let jdb = SpliceJunctionDb::from_raw_junctions(&raw);
 
             let prepared: Vec<PreparedJunction> = raw
@@ -335,10 +359,10 @@ impl GenomeIndex {
                 n_genome_real
             );
 
-            (jdb, Some(tr), prepared)
+            (jdb, prepared)
         } else {
-            log::info!("No GTF file provided, all junctions will be novel");
-            (SpliceJunctionDb::empty(), None, Vec::new())
+            log::info!("No GTF or --sjdbFileChrStartEnd provided, all junctions will be novel");
+            (SpliceJunctionDb::empty(), Vec::new())
         };
 
         log::info!(

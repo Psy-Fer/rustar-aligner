@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -42,7 +41,34 @@ impl GenomeIndex {
             sa_index.data.len()
         );
 
-        // Load GTF annotations if provided
+        // Load prepared junctions from the index (sjdbInfo.txt) if present.
+        // STAR appends a Gsj flanking-sequence buffer to the genome at build
+        // time; align-time code needs the parsed junctions to (a) decode SA hits
+        // that land inside that buffer back to real (donor, acceptor) positions,
+        // and (b) recognise annotated junctions when aligning against a
+        // pre-built annotated index.
+        let sjdb_info_path = genome_dir.join("sjdbInfo.txt");
+        let (prepared_junctions, sjdb_overhang) = if sjdb_info_path.exists() {
+            let tab = sjdb_insert::read_sjdb_info_tab(&sjdb_info_path, &genome)?;
+            log::info!(
+                "Loaded sjdbInfo.txt: {} junctions, sjdbOverhang={}",
+                tab.junctions.len(),
+                tab.sjdb_overhang,
+            );
+            (tab.junctions, tab.sjdb_overhang)
+        } else {
+            (Vec::new(), 0)
+        };
+
+        // Build the annotated-junction database consulted at stitch time.
+        //   - If a GTF is supplied at align time, parse it (STAR's on-the-fly path).
+        //   - Otherwise fall back to the junctions stored in the index
+        //     (sjdbInfo.txt). Without this fallback, the standard workflow —
+        //     build the index once with `--sjdbGTFfile`, then align with only
+        //     `--genomeDir` — would treat every junction as novel (the runtime
+        //     db would be empty), losing all `sjdbScore` bonuses and annotated
+        //     junction recognition. Keyed on the stored (post-sjdbPrepare) donor/
+        //     acceptor coordinates, matching what the stitch scan produces.
         let junction_db = if let Some(ref gtf_path) = params.sjdb_gtf_file {
             SpliceJunctionDb::from_gtf_configured(
                 gtf_path,
@@ -51,6 +77,16 @@ impl GenomeIndex {
                 &params.sjdb_gtf_chr_prefix,
                 &params.sjdb_gtf_tag_exon_parent_transcript,
             )?
+        } else if !prepared_junctions.is_empty() {
+            let raw: Vec<(usize, u64, u64, u8)> = prepared_junctions
+                .iter()
+                .map(|j| (j.chr_idx, j.stored_start(), j.stored_end(), j.strand))
+                .collect();
+            log::info!(
+                "No GTF at align time; loaded {} annotated junctions from index sjdbInfo.txt",
+                raw.len()
+            );
+            SpliceJunctionDb::from_raw_junctions(&raw)
         } else {
             log::info!("No GTF file provided, all junctions will be novel");
             SpliceJunctionDb::empty()
@@ -87,6 +123,8 @@ impl GenomeIndex {
                 &genome,
                 &params.sjdb_gtf_tag_exon_parent_transcript,
                 &params.sjdb_gtf_tag_exon_parent_gene,
+                &params.sjdb_gtf_tag_exon_parent_gene_name,
+                &params.sjdb_gtf_tag_exon_parent_gene_type,
             )?)
         } else {
             None
@@ -99,24 +137,6 @@ impl GenomeIndex {
                 tr.gene_ids.len()
             );
         }
-
-        // Reload prepared junctions + sjdbOverhang from sjdbInfo.txt when
-        // present. STAR appends a Gsj flanking-sequence buffer to the
-        // genome at build time; align-time code needs the parsed junctions
-        // to decode SA hits that land inside that buffer back to real
-        // `(donor, acceptor)` genome positions.
-        let sjdb_info_path = genome_dir.join("sjdbInfo.txt");
-        let (prepared_junctions, sjdb_overhang) = if sjdb_info_path.exists() {
-            let tab = sjdb_insert::read_sjdb_info_tab(&sjdb_info_path, &genome)?;
-            log::info!(
-                "Loaded sjdbInfo.txt: {} junctions, sjdbOverhang={}",
-                tab.junctions.len(),
-                tab.sjdb_overhang,
-            );
-            (tab.junctions, tab.sjdb_overhang)
-        } else {
-            (Vec::new(), 0)
-        };
 
         Ok(GenomeIndex {
             genome,
@@ -187,28 +207,33 @@ fn load_genome(genome_dir: &Path, _params: &Parameters) -> Result<Genome, Error>
     let n_genome_real = chr_start[n_chr_real];
     let n_genome = read_genome_file_size(genome_dir)?.unwrap_or(n_genome_real);
 
-    // Load Genome sequence file
+    // Memory-map the Genome sequence file (forward strand only, `n_genome`
+    // bytes). The reverse-complement half is computed on access by
+    // `GenomeSeq::base`, so the ~`n_genome`-byte RC buffer is never
+    // materialized and the forward bytes are reclaimable file-backed pages
+    // rather than an anonymous `Vec`. The genome is accessed by single-byte
+    // lookups during alignment, which `base` serves from the map.
     let genome_path = genome_dir.join("Genome");
-    let genome_data = std::fs::read(&genome_path).map_err(|e| Error::io(e, &genome_path))?;
+    let file = File::open(&genome_path).map_err(|e| Error::io(e, &genome_path))?;
+    // SAFETY: Genome is opened read-only and never mutated while loaded.
+    let mmap = unsafe { memmap2::Mmap::map(&file).map_err(|e| Error::io(e, &genome_path))? };
+    // Each `compare_seq_to_genome` touches only a read-length run of bytes (≪ one
+    // page) at a genome position that is effectively random across reads, so kernel
+    // readahead past that page is wasted I/O — same rationale as the SA/SAindex maps.
+    advise_random(&mmap);
 
-    if genome_data.len() != n_genome as usize {
+    if mmap.len() != n_genome as usize {
         return Err(Error::Index(format!(
             "Genome file size mismatch: expected {} bytes, got {}",
             n_genome,
-            genome_data.len()
+            mmap.len()
         )));
     }
 
-    // Build full sequence buffer (forward + reverse complement)
-    let mut sequence = vec![5u8; (n_genome * 2) as usize];
-    sequence[..n_genome as usize].copy_from_slice(&genome_data);
-
-    // Build reverse complement
-    for i in 0..n_genome as usize {
-        let base = sequence[i];
-        let complement = if base < 4 { 3 - base } else { base };
-        sequence[2 * n_genome as usize - 1 - i] = complement;
-    }
+    let sequence = crate::genome::GenomeSeq::Mapped {
+        fwd: std::sync::Arc::new(mmap),
+        n_genome: n_genome as usize,
+    };
 
     Ok(Genome {
         sequence,
@@ -218,13 +243,36 @@ fn load_genome(genome_dir: &Path, _params: &Parameters) -> Result<Genome, Error>
         chr_name,
         chr_length,
         chr_start,
+        // Loading transformGenomeBlocks.tsv back is only needed for the
+        // (not yet implemented) align-time back-transform.
+        transform_blocks: None,
     })
 }
 
 /// Load suffix array from disk.
+///
+/// The `SA` file is **memory-mapped** rather than read into a `Vec`: it is the
+/// largest index component (≈21 GB for mouse) and is accessed by random binary
+/// search during alignment. mmap keeps it as reclaimable file-backed memory
+/// (demand-loaded, dropped — not swapped — under pressure) instead of an
+/// un-reclaimable anonymous allocation. `MADV_RANDOM` disables readahead, which
+/// would waste I/O on the random access pattern.
+/// Best-effort `MADV_RANDOM` on a read-only mmap. `madvise` (and `memmap2::Advice`)
+/// is Unix-only, so this is a no-op on platforms without it (e.g. Windows).
+#[cfg(unix)]
+fn advise_random(mmap: &memmap2::Mmap) {
+    let _ = mmap.advise(memmap2::Advice::Random); // best-effort; ignore if unsupported
+}
+#[cfg(not(unix))]
+fn advise_random(_mmap: &memmap2::Mmap) {}
+
 fn load_suffix_array(genome_dir: &Path, genome: &Genome) -> Result<SuffixArray, Error> {
     let sa_path = genome_dir.join("SA");
-    let sa_data = std::fs::read(&sa_path).map_err(|e| Error::io(e, &sa_path))?;
+    let file = File::open(&sa_path).map_err(|e| Error::io(e, &sa_path))?;
+    // SAFETY: the SA file is opened read-only and not mutated elsewhere while
+    // the index is loaded; the mapping is only ever read.
+    let mmap = unsafe { memmap2::Mmap::map(&file).map_err(|e| Error::io(e, &sa_path))? };
+    advise_random(&mmap);
 
     let gstrand_bit = SuffixArray::calculate_gstrand_bit(genome.n_genome);
     let word_length = gstrand_bit + 1;
@@ -236,7 +284,7 @@ fn load_suffix_array(genome_dir: &Path, genome: &Genome) -> Result<SuffixArray, 
     // total_bits = (lengthByte - 8) * 8
     // length = (total_bits / wordLength) + 1
     // BUT we need ceiling division to account for partial entries
-    let length_byte = sa_data.len();
+    let length_byte = mmap.len();
     let length = if length_byte < 8 {
         0
     } else {
@@ -245,7 +293,7 @@ fn load_suffix_array(genome_dir: &Path, genome: &Genome) -> Result<SuffixArray, 
         entries + 1
     };
 
-    let data = PackedArray::from_bytes(word_length, length, sa_data);
+    let data = PackedArray::from_mmap(word_length, length, mmap);
 
     Ok(SuffixArray {
         data,
@@ -255,6 +303,11 @@ fn load_suffix_array(genome_dir: &Path, genome: &Genome) -> Result<SuffixArray, 
 }
 
 /// Load SA index from disk.
+///
+/// The small fixed header (`nbases` + the `genomeSAindexStart` array) is read
+/// normally; the packed-data region (≈1.8 GB for mouse) is **memory-mapped**
+/// from its byte offset for the same reason as the SA — reclaimable, demand-
+/// loaded file-backed memory instead of an anonymous `Vec`.
 fn load_sa_index(genome_dir: &Path, gstrand_bit: u32) -> Result<SaIndex, Error> {
     let sai_path = genome_dir.join("SAindex");
     let mut file = File::open(&sai_path).map_err(|e| Error::io(e, &sai_path))?;
@@ -273,15 +326,23 @@ fn load_sa_index(genome_dir: &Path, gstrand_bit: u32) -> Result<SaIndex, Error> 
         genome_sa_index_start.push(val);
     }
 
-    // Read packed data
-    let mut packed_data = Vec::new();
-    file.read_to_end(&mut packed_data)
-        .map_err(|e| Error::io(e, &sai_path))?;
+    // Map the packed-data region: header is `nbases` (8B) + (nbases+1)×8B.
+    let header_len = 8 + 8 * (u64::from(nbases) + 1);
+    // SAFETY: SAindex is opened read-only and never mutated while loaded.
+    // memmap2 handles non-page-aligned offsets internally; the map runs from
+    // `header_len` to EOF and is only ever read.
+    let mmap = unsafe {
+        memmap2::MmapOptions::new()
+            .offset(header_len)
+            .map(&file)
+            .map_err(|e| Error::io(e, &sai_path))?
+    };
+    advise_random(&mmap);
 
     let word_length = gstrand_bit + 3;
     let num_indices = SaIndex::calculate_num_indices(nbases);
 
-    let data = PackedArray::from_bytes(word_length, num_indices as usize, packed_data);
+    let data = PackedArray::from_mmap(word_length, num_indices as usize, mmap);
 
     Ok(SaIndex {
         nbases,

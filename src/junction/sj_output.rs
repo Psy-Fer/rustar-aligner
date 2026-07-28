@@ -189,11 +189,16 @@ impl SpliceJunctionStats {
                 if (*max_overhang as i32) < overhang_min[cat] {
                     continue;
                 }
-                if (*unique as i32) < unique_min[cat] {
-                    continue;
-                }
+                // STAR keeps a junction if EITHER the unique count OR the total
+                // (unique+multi) count meets its threshold — an OR, not an AND
+                // (STAR manual; confirmed against STAR source and STAR-rs
+                // `star_sj.rs`). Testing them as two independent drop-guards was
+                // an AND, which discarded every junction supported only by
+                // multi-mapping reads (unique==0) — the cause of rustar-aligner
+                // reporting far fewer novel junctions than STAR. Drop only when
+                // BOTH thresholds fail.
                 let total = unique + multi;
-                if (total as i32) < total_min[cat] {
+                if (*unique as i32) < unique_min[cat] && (total as i32) < total_min[cat] {
                     continue;
                 }
                 if dist_min[cat] > 0 && min_dist_to_neighbor[idx] < dist_min[cat] as u64 {
@@ -228,10 +233,47 @@ impl SpliceJunctionStats {
     ) -> Result<(), Error> {
         let file = File::create(output_path).map_err(|e| Error::io(e, output_path))?;
         let mut writer = BufWriter::new(file);
+        let written = self.write_sj_lines(&mut writer, genome, params)?;
+        writer.flush().map_err(|e| Error::io(e, output_path))?;
+        let filtered = self.junctions.len() as u32 - written;
+        log::info!(
+            "Wrote {} junctions to {} ({} filtered by outSJfilter*)",
+            written,
+            output_path.display(),
+            filtered,
+        );
+        Ok(())
+    }
 
+    /// Surviving junctions sorted by (chr, intron_start, intron_end) — the
+    /// canonical `SJ.out.tab` order, which is also the row order of the `SJ`
+    /// solo-feature matrix. Returns the (intron_start, intron_end) absolute-coord
+    /// keys so the SJ recorder can be mapped to matrix rows.
+    pub(crate) fn sj_feature_order(&self, params: &Parameters) -> Vec<(u64, u64)> {
         let surviving = self.compute_surviving_junctions(params);
+        let mut keys: Vec<(usize, u64, u64)> = self
+            .junctions
+            .iter()
+            .filter(|e| surviving.contains(e.key()))
+            .map(|e| {
+                let k = e.key();
+                (k.chr_idx, k.intron_start, k.intron_end)
+            })
+            .collect();
+        keys.sort_unstable();
+        keys.into_iter().map(|(_, s, e)| (s, e)).collect()
+    }
 
-        // Collect and sort surviving junctions for deterministic output
+    /// Write the 9-column `SJ.out.tab` lines (sorted) to `writer`; returns the
+    /// number written. Shared by `write_output` and the SJ feature's
+    /// `features.tsv`, so both stay in the same order as the SJ matrix rows.
+    pub(crate) fn write_sj_lines(
+        &self,
+        writer: &mut dyn std::io::Write,
+        genome: &Genome,
+        params: &Parameters,
+    ) -> Result<u32, Error> {
+        let surviving = self.compute_surviving_junctions(params);
         let mut output_junctions: Vec<_> = self
             .junctions
             .iter()
@@ -262,11 +304,9 @@ impl SpliceJunctionStats {
                 .chr_name
                 .get(key.chr_idx)
                 .ok_or_else(|| Error::Index("Invalid chromosome index in junction".to_string()))?;
-
             let chr_start_pos = genome.chr_start[key.chr_idx];
             let chr_pos_start = key.intron_start - chr_start_pos + 1;
             let chr_pos_end = key.intron_end - chr_start_pos + 1;
-
             writeln!(
                 writer,
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -280,21 +320,10 @@ impl SpliceJunctionStats {
                 multi,
                 max_overhang
             )
-            .map_err(|e| Error::io(e, output_path))?;
+            .map_err(|e| Error::Index(format!("SJ write: {e}")))?;
             written += 1;
         }
-
-        writer.flush().map_err(|e| Error::io(e, output_path))?;
-
-        let filtered = self.junctions.len() as u32 - written;
-        log::info!(
-            "Wrote {} junctions to {} ({} filtered by outSJfilter*)",
-            written,
-            output_path.display(),
-            filtered,
-        );
-
-        Ok(())
+        Ok(written)
     }
 
     /// Get the number of unique junctions tracked
@@ -523,7 +552,8 @@ mod tests {
         stats.record_junction(0, 300, 400, 2, SpliceMotif::GcAg, false, 15, true);
 
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,
@@ -584,7 +614,8 @@ mod tests {
         stats.record_junction(0, 300, 400, 1, SpliceMotif::GtAg, true, 20, false);
 
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,
@@ -619,7 +650,8 @@ mod tests {
         stats.record_junction(0, 100, 200, 1, SpliceMotif::NonCanonical, true, 2, true);
 
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,
@@ -645,7 +677,7 @@ mod tests {
     fn test_compute_surviving_junctions_basic() {
         let stats = SpliceJunctionStats::new();
 
-        // High-quality canonical junction (should survive)
+        // High-quality canonical junction, unique read (should survive)
         stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 50, false);
 
         // Low-overhang non-canonical junction (should be filtered: 10 < 30)
@@ -653,18 +685,32 @@ mod tests {
             stats.record_junction(0, 300, 400, 1, SpliceMotif::NonCanonical, true, 10, false);
         }
 
-        // Low-count canonical junction (unique=0 < 1)
+        // Canonical junction supported ONLY by a multi-mapper (unique=0, total=1).
+        // STAR keeps it via the OR count filter: total(1) >= CountTotalMin[canonical](1).
         stats.record_junction(0, 500, 600, 1, SpliceMotif::GtAg, false, 20, false);
+
+        // Non-canonical junction with too few reads (unique=0 and total=1, both
+        // below CountUniqueMin/CountTotalMin[non-canonical]=3) but good overhang:
+        // fails the OR count filter on BOTH branches -> filtered.
+        stats.record_junction(0, 700, 800, 1, SpliceMotif::NonCanonical, false, 40, false);
 
         let params = default_params();
         let surviving = stats.compute_surviving_junctions(&params);
 
-        // Only the first junction should survive
-        assert_eq!(surviving.len(), 1);
+        // The unique canonical and the multi-only canonical survive; the
+        // low-overhang and low-count non-canonical junctions are filtered.
+        assert_eq!(surviving.len(), 2);
         assert!(surviving.contains(&SjKey {
             chr_idx: 0,
             intron_start: 100,
             intron_end: 200,
+            strand: 1,
+            motif: 1,
+        }));
+        assert!(surviving.contains(&SjKey {
+            chr_idx: 0,
+            intron_start: 500,
+            intron_end: 600,
             strand: 1,
             motif: 1,
         }));
@@ -697,7 +743,8 @@ mod tests {
         }
 
         let genome = Genome {
-            sequence: vec![0; 1000],
+            transform_blocks: None,
+            sequence: vec![0; 1000].into(),
             n_genome: 1000,
             n_genome_real: 1000,
             n_chr_real: 1,

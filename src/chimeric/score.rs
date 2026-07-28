@@ -71,8 +71,8 @@ fn extract_motif(
     }
 
     let genome_idx = (chr_start + extract_pos) as usize;
-    let b1 = genome.sequence.get(genome_idx).copied().unwrap_or(4);
-    let b2 = genome.sequence.get(genome_idx + 1).copied().unwrap_or(4);
+    let b1 = genome.sequence.get(genome_idx).unwrap_or(4);
+    let b2 = genome.sequence.get(genome_idx + 1).unwrap_or(4);
 
     // Convert to bases
     let mut motif = vec![base_to_char(b1), base_to_char(b2)];
@@ -127,8 +127,8 @@ pub fn calculate_repeat_length(
             break;
         }
 
-        let d_base = genome.sequence.get(d_pos as usize).copied().unwrap_or(4);
-        let a_base = genome.sequence.get(a_pos as usize).copied().unwrap_or(4);
+        let d_base = genome.sequence.get(d_pos as usize).unwrap_or(4);
+        let a_base = genome.sequence.get(a_pos as usize).unwrap_or(4);
 
         if d_base == a_base && d_base < 4 {
             // Only count ACGT, not N
@@ -171,7 +171,8 @@ mod tests {
 
     fn mock_genome_with_sequence(seq: Vec<u8>) -> Genome {
         Genome {
-            sequence: seq,
+            transform_blocks: None,
+            sequence: seq.into(),
             n_genome: 100,
             n_genome_real: 100,
             n_chr_real: 1,

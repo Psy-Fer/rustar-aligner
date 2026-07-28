@@ -14,18 +14,34 @@ bitflags::bitflags! {
         const NH = 1 << 0;
         const HI = 1 << 1;
         const AS = 1 << 2;
+        /// `NM:i` — SAM-standard edit distance (mismatches + inserted + deleted
+        /// bases). NOT in STAR's `Standard` preset; opt-in via `NM` / `All`.
         const NM = 1 << 3;
         const MD = 1 << 4;
         const JM = 1 << 5;
         const JI = 1 << 6;
         const XS = 1 << 7;
         const RG = 1 << 8;
+        /// STARsolo gene id of the read's Gene-feature assignment (GX:Z).
+        const GX = 1 << 9;
+        /// STARsolo gene name (symbol) of the Gene-feature assignment (GN:Z).
+        const GN = 1 << 10;
+        /// `nM:i` — STAR's mismatch count (mismatches only, excluding indels). This
+        /// is the tag in STAR's `Standard` preset (distinct from `NM`).
+        const NMM = 1 << 11;
+        /// WASP allele-specific-mapping tags (require --waspOutputMode SAMtag).
+        const VW = 1 << 12;
+        const VA = 1 << 13;
+        const VG = 1 << 14;
 
+        // STAR `Standard` = NH HI AS nM  (the mismatch count nM, NOT edit-distance NM).
         const STANDARD =
             Self::NH.bits() | Self::HI.bits() | Self::AS.bits()
-            | Self::NM.bits();
+            | Self::NMM.bits();
+        // STAR `All` additionally includes the edit-distance NM, MD, jM, jI (+ XS here).
         const ALL =
             Self::STANDARD.bits()
+            | Self::NM.bits()
             | Self::MD.bits() | Self::JM.bits() | Self::JI.bits() | Self::XS.bits();
     }
 }
@@ -42,13 +58,20 @@ impl FromStr for SamAttributes {
             "NH" => Self::NH,
             "HI" => Self::HI,
             "AS" => Self::AS,
-            // STAR maps NM attribute to 'nM' tag (mismatches only, not edit distance)
-            "NM" | "nM" => Self::NM,
+            // `NM` = SAM-standard edit distance; `nM` = STAR's mismatch count. These
+            // are distinct tags (only `nM` is in the `Standard` preset).
+            "NM" => Self::NM,
+            "nM" => Self::NMM,
             "MD" => Self::MD,
             "jM" => Self::JM,
             "jI" => Self::JI,
             "XS" => Self::XS,
             "RG" => Self::RG,
+            "GX" => Self::GX,
+            "GN" => Self::GN,
+            "vW" => Self::VW,
+            "vA" => Self::VA,
+            "vG" => Self::VG,
             other => return Err(format!("unknown --outSAMattributes token '{other}'")),
         })
     }
@@ -94,7 +117,7 @@ impl clap::Args for SamAttributes {
                 .default_values(["Standard"])
                 .help(
                     "SAM optional tags: Standard, All, None, or any combination of \
-                     NH HI AS NM nM MD jM jI XS RG.",
+                     NH HI AS NM nM MD jM jI XS RG vW vA vG.",
                 ),
         )
     }

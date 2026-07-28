@@ -5,14 +5,11 @@ use crate::align::stitch::{
     PE_SPACER_BASE, cluster_seeds, finalize_transcript, split_combined_wt, stitch_seeds_core,
     stitch_seeds_with_jdb_debug,
 };
-use crate::align::transcript::{Exon, KindExt as _, Transcript};
+use crate::align::transcript::{Exon, Transcript};
 use crate::error::Error;
 use crate::index::GenomeIndex;
-use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
+use crate::params::{IntronMotifFilter, IntronStrandFilter, MultimapperOrder, Parameters};
 use crate::stats::UnmappedReason;
-use noodles::sam::alignment::record::cigar;
-use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
-use std::cmp::Ordering;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Derive a deterministic per-read RNG seed from `run_rng_seed` + the read name.
@@ -42,7 +39,7 @@ fn shuffle_tied_prefix<T>(items: &mut [T], score_fn: impl Fn(&T) -> i32, seed: u
     if tied < 2 {
         return;
     }
-    items[..tied].shuffle(&mut StdRng::seed_from_u64(seed));
+    crate::rng::shuffle_deterministic(&mut items[..tied], seed);
 }
 
 /// Result of aligning a single read: (transcripts, chimeric_alignments, n_for_mapq, unmapped_reason)
@@ -350,22 +347,24 @@ pub fn align_read(
     // Doing quality filters first is wrong: it can remove the high-scoring primary,
     // leaving a lower-scoring secondary that then passes as the "best" alignment.
 
-    // Deduplicate transcripts with identical genomic coordinates AND CIGAR.
-    transcripts.sort_by(|a, b| {
-        (a.chr_idx, a.genome_start, a.genome_end, a.is_reverse)
-            .cmp(&(b.chr_idx, b.genome_start, b.genome_end, b.is_reverse))
-            .then_with(|| cmp_cigar(&a.cigar, &b.cigar))
-            .then_with(|| b.score.cmp(&a.score))
-    });
-    transcripts.dedup_by(|a, b| {
-        a.chr_idx == b.chr_idx
-            && a.genome_start == b.genome_start
-            && a.genome_end == b.genome_end
-            && a.is_reverse == b.is_reverse
-            && a.cigar == b.cigar
-    });
+    // Deduplicate transcripts with identical genomic coordinates AND CIGAR,
+    // PRESERVING discovery (window) order. STAR's primary tie-break falls back
+    // to the earliest-discovered alignment, so we must not reorder here (the
+    // old code sorted by coordinate, destroying that order).
+    {
+        let mut seen = std::collections::HashSet::new();
+        transcripts.retain(|t| {
+            seen.insert((
+                t.chr_idx,
+                t.genome_start,
+                t.genome_end,
+                t.is_reverse,
+                t.cigar_string(),
+            ))
+        });
+    }
 
-    // Sort by score descending (deterministic tie-breaking).
+    // Deterministic primary tie-break (score, then a fixed positional order).
     transcripts.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -375,12 +374,24 @@ pub fn align_read(
             .then_with(|| a.is_reverse.cmp(&b.is_reverse))
     });
 
-    // Randomize primary among best-scoring ties (ReadAlign_multMapSelect.cpp:71-79).
-    shuffle_tied_prefix(
-        &mut transcripts,
-        |t| t.score,
-        per_read_seed(params.run_rng_seed, read_name),
-    );
+    // Primary selection — STAR's multMapSelect (ReadAlign_multMapSelect.cpp).
+    //
+    // STAR's DEFAULT (`--outMultimapperOrder Old_2.4`) does NOT consult the RNG
+    // for primary selection; it marks the deterministic best alignment primary.
+    // Only `--outMultimapperOrder Random` shuffles. Previously rustar-aligner
+    // shuffled unconditionally, which randomised the primary among equal-score
+    // loci and diverged from STAR's deterministic choice. Gate the shuffle on
+    // the Random mode so the default is deterministic and STAR-faithful.
+    //
+    // Under Random, we shuffle the tied top-score prefix with a per-read seed
+    // (deterministic per read → thread-count invariant).
+    if params.out_multimapper_order == MultimapperOrder::Random {
+        shuffle_tied_prefix(
+            &mut transcripts,
+            |t| t.score,
+            per_read_seed(params.run_rng_seed, read_name),
+        );
+    }
 
     // Score-range filter: keep only alignments within outFilterMultimapScoreRange of the best.
     // (STAR's multMapSelect step — must run before quality filters.)
@@ -955,44 +966,108 @@ pub fn align_paired_read(
         }
     }
 
+    // --peOverlapNbasesMin: if the mates overlap in genome space, merge them into one
+    // single-end read, align that merged read through the same SE pipeline (`align_read`,
+    // this module), and convert each resulting SE transcript back into a two-mate pair,
+    // rescoring from scratch in the PE frame (`crate::align::pe_overlap`). STAR's semantics
+    // (mirrored here, per `star_pe_overlap.rs` in the sister project STAR-rs) are an
+    // unconditional overwrite: if the merge succeeds and at least one transcript converts,
+    // the separate-mate `joint_pairs` computed above is replaced outright — no additional
+    // score comparison, and the multimap-range filter below is not skipped, it just runs once
+    // on the replaced set instead of twice.
+    if params.pe_overlap_nbases_min > 0 {
+        let m1_slice = &combined_read[..len1];
+        let m2rc_slice = &combined_read[len1 + 1..];
+        if let Some(merge) = crate::align::pe_overlap::pe_merge_mates(
+            m1_slice,
+            m2rc_slice,
+            params.pe_overlap_nbases_min,
+            params.pe_overlap_mmp,
+        ) {
+            // STAR's peMergeRA->mapOneRead() is a FIND step: it locates windows on the
+            // merged read WITHOUT the read-length quality gates (mappedFilter runs later,
+            // at the PE level, on the reconstructed pair — ReadAlign_oneRead.cpp:87-91).
+            // Applying the SE mappedFilter here (on the longer merged length) would drop
+            // valid merges the PE stage would keep. So find on the merged read with the
+            // length-relative gates disabled; the PE decision tree below does the real
+            // filtering after convert_merged_transcript_to_pe.
+            let mut merge_params = params.clone();
+            merge_params.out_filter_match_nmin = 0;
+            merge_params.out_filter_match_nmin_over_lread = 0.0;
+            merge_params.out_filter_score_min_over_lread = 0.0;
+            let (merged_transcripts, _merged_chim, _n_mapq, _unmapped) =
+                align_read(&merge.merged, read_name, index, &merge_params)?;
+            let mut converted: Vec<PairedAlignment> = Vec::new();
+            for t in &merged_transcripts {
+                let Some((m1, m2)) = crate::align::pe_overlap::convert_merged_transcript_to_pe(
+                    t,
+                    &merge,
+                    mate1_seq,
+                    mate2_seq,
+                    &index.genome,
+                    &scorer,
+                ) else {
+                    continue;
+                };
+                let m1_span = m1.genome_end - m1.genome_start;
+                let m2_span = m2.genome_end - m2.genome_start;
+                let combined_span =
+                    m1.genome_end.max(m2.genome_end) - m1.genome_start.min(m2.genome_start);
+                let combined_wt_score = (m1.score - scorer.genomic_length_penalty(m1_span))
+                    + (m2.score - scorer.genomic_length_penalty(m2_span))
+                    + scorer.genomic_length_penalty(combined_span);
+                let combined_n_match: u32 = m1
+                    .exons
+                    .iter()
+                    .map(|e| (e.read_end - e.read_start) as u32)
+                    .sum::<u32>()
+                    + m2.exons
+                        .iter()
+                        .map(|e| (e.read_end - e.read_start) as u32)
+                        .sum::<u32>();
+                let is_proper_pair = check_proper_pair(&m1, &m2, params);
+                let insert_size = calculate_insert_size(&m1, &m2);
+                converted.push(PairedAlignment {
+                    mate1_transcript: m1,
+                    mate2_transcript: m2,
+                    mate1_region: (0, len1),
+                    mate2_region: (0, len2),
+                    is_proper_pair,
+                    insert_size,
+                    combined_wt_score,
+                    combined_n_match,
+                });
+            }
+            if !converted.is_empty() {
+                joint_pairs = converted;
+            }
+        }
+    }
+
     // --- Decision tree: dedup, score-filter, quality-filter, then half-mapped fallback ---
 
     // Step 1: position dedup — remove exact (chr, mate1_pos, mate2_pos, strand, CIGAR) duplicates.
     // Run dedup BEFORE score-range filter so the backup pool is already deduplicated.
     // (STAR's ordering is multMapSelect → dedup, but dedup before multMapSelect is equivalent
     // since removing exact duplicates doesn't change the best score.)
-    joint_pairs.sort_by(|a, b| {
-        let pos_cmp = (
-            a.mate1_transcript.chr_idx,
-            a.mate1_transcript.genome_start,
-            a.mate1_transcript.is_reverse,
-            a.mate2_transcript.genome_start,
-            a.mate2_transcript.is_reverse,
-        )
-            .cmp(&(
-                b.mate1_transcript.chr_idx,
-                b.mate1_transcript.genome_start,
-                b.mate1_transcript.is_reverse,
-                b.mate2_transcript.genome_start,
-                b.mate2_transcript.is_reverse,
-            ));
-        if pos_cmp != std::cmp::Ordering::Equal {
-            return pos_cmp;
-        }
-        b.combined_wt_score
-            .cmp(&a.combined_wt_score)
-            .then_with(|| cmp_cigar(&a.mate1_transcript.cigar, &b.mate1_transcript.cigar))
-            .then_with(|| cmp_cigar(&a.mate2_transcript.cigar, &b.mate2_transcript.cigar))
-    });
-    joint_pairs.dedup_by(|a, b| {
-        a.mate1_transcript.chr_idx == b.mate1_transcript.chr_idx
-            && a.mate1_transcript.genome_start == b.mate1_transcript.genome_start
-            && a.mate1_transcript.is_reverse == b.mate1_transcript.is_reverse
-            && a.mate1_transcript.cigar == b.mate1_transcript.cigar
-            && a.mate2_transcript.genome_start == b.mate2_transcript.genome_start
-            && a.mate2_transcript.is_reverse == b.mate2_transcript.is_reverse
-            && a.mate2_transcript.cigar == b.mate2_transcript.cigar
-    });
+    // Order-preserving exact dedup (keep first in discovery order). We must not
+    // sort by position here: STAR's primary tie-break falls back to the
+    // earliest-discovered pair, so discovery order has to survive to the
+    // primary-selection sort below.
+    {
+        let mut seen = std::collections::HashSet::new();
+        joint_pairs.retain(|p| {
+            seen.insert((
+                p.mate1_transcript.chr_idx,
+                p.mate1_transcript.genome_start,
+                p.mate1_transcript.is_reverse,
+                p.mate1_transcript.cigar_string(),
+                p.mate2_transcript.genome_start,
+                p.mate2_transcript.is_reverse,
+                p.mate2_transcript.cigar_string(),
+            ))
+        });
+    }
 
     // Post-finalization mate2-exon-subset dedup.
     {
@@ -1082,28 +1157,35 @@ pub fn align_paired_read(
         ));
     }
 
+    // Deterministic primary tie-break (combined score, then a fixed positional
+    // order on mate1).
     joint_pairs.sort_by(|a, b| {
-        b.combined_wt_score
-            .cmp(&a.combined_wt_score)
-            .then_with(|| a.mate1_transcript.chr_idx.cmp(&b.mate1_transcript.chr_idx))
-            .then_with(|| {
-                a.mate1_transcript
-                    .genome_start
-                    .cmp(&b.mate1_transcript.genome_start)
-            })
-            .then_with(|| {
-                a.mate1_transcript
-                    .is_reverse
-                    .cmp(&b.mate1_transcript.is_reverse)
-            })
+        b.combined_wt_score.cmp(&a.combined_wt_score).then_with(|| {
+            (
+                a.mate1_transcript.chr_idx,
+                a.mate1_transcript.genome_start,
+                a.mate1_transcript.is_reverse,
+            )
+                .cmp(&(
+                    b.mate1_transcript.chr_idx,
+                    b.mate1_transcript.genome_start,
+                    b.mate1_transcript.is_reverse,
+                ))
+        })
     });
 
-    // Randomize primary among best-scoring pairs (STAR's funPrimaryAlignMark).
-    shuffle_tied_prefix(
-        &mut joint_pairs,
-        |pa| pa.combined_wt_score,
-        per_read_seed(params.run_rng_seed, read_name),
-    );
+    // Primary selection — STAR's multMapSelect. STAR's default does not use the
+    // RNG for the primary; only `--outMultimapperOrder Random` shuffles. Gate
+    // the (previously unconditional) shuffle so the default is deterministic
+    // and STAR-faithful; under Random, shuffle the tied top-score prefix with a
+    // per-read seed (deterministic per read → thread-count invariant).
+    if params.out_multimapper_order == MultimapperOrder::Random {
+        shuffle_tied_prefix(
+            &mut joint_pairs,
+            |pa| pa.combined_wt_score,
+            per_read_seed(params.run_rng_seed, read_name),
+        );
+    }
 
     // Step 4: quality filter (mappedFilter).
     filter_paired_transcripts(&mut joint_pairs, params);
@@ -1227,18 +1309,6 @@ pub fn align_paired_read(
     }
 }
 
-/// Comparator for deduplicating structs containing CIGAR ops via sort→dedup
-fn cmp_cigar(a: &[cigar::Op], b: &[cigar::Op]) -> Ordering {
-    a.len().cmp(&b.len()).then_with(|| {
-        (a.iter().zip(b.iter()))
-            .find_map(|(a, b)| {
-                let ord = (a.char(), a.len()).cmp(&(b.char(), b.len()));
-                (ord != Ordering::Equal).then_some(ord)
-            })
-            .unwrap_or(Ordering::Equal)
-    })
-}
-
 /// Attempt to pair two per-mate transcripts into a PairedAlignment.
 ///
 /// Returns `None` if the mates are incompatible (same strand, different chr, too far, etc.).
@@ -1322,7 +1392,7 @@ fn try_pair_transcripts(
 }
 
 /// Check if paired alignment is a proper pair
-fn check_proper_pair(
+pub(crate) fn check_proper_pair(
     mate1_trans: &Transcript,
     mate2_trans: &Transcript,
     params: &Parameters,
@@ -1505,7 +1575,8 @@ mod tests {
         }
 
         let genome = Genome {
-            sequence,
+            transform_blocks: None,
+            sequence: sequence.into(),
             n_genome,
             n_genome_real: n_genome,
             n_chr_real: 1,

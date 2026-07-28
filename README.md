@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 rustar-aligner aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection (including multi-junction Tier 3), gene-level quantification, and multi-threaded parallel processing. 396 tests passing (383 unit + 8 integration + others), 0 clippy warnings.
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection (including multi-junction Tier 3), gene-level quantification, **single-cell quantification (STARsolo: Gene / GeneFull / SJ / Velocyto features, barcode correction, UMI dedup, EmptyDrops_CR cell calling)**, and multi-threaded parallel processing. Solo count matrices are byte-identical to STARsolo's. 516 tests passing (491 unit + 25 integration), 0 clippy warnings. See [Performance & Benchmarks](#performance--benchmarks) for a native three-way comparison against STARsolo and CellRanger.
 
 ## Quick Start
 
@@ -86,6 +86,26 @@ target/release/rustar-aligner \
   --outFileNamePrefix /path/to/output_
 ```
 
+### Single-cell (STARsolo)
+
+10x Chromium-style single-cell quantification. `readFilesIn` takes the cDNA
+read first, then the barcode read (`R2 R1` for 10x). Writes a
+`Solo.out/<feature>/{raw,filtered}/` count matrix per requested feature:
+
+```bash
+target/release/rustar-aligner \
+  --genomeDir /path/to/genome_index \
+  --readFilesIn cDNA_R2.fq.gz barcode_R1.fq.gz \
+  --readFilesCommand zcat \
+  --soloType CB_UMI_Simple \
+  --soloCBwhitelist /path/to/3M-february-2018.txt \
+  --soloCBstart 1 --soloCBlen 16 --soloUMIstart 17 --soloUMIlen 12 \
+  --soloFeatures Gene GeneFull SJ Velocyto \
+  --soloCellFilter EmptyDrops_CR \
+  --outSAMtype None \
+  --outFileNamePrefix /path/to/output_
+```
+
 ## Accuracy Comparison vs STAR
 
 Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STAR 2.7.x with identical parameters and genome index.
@@ -119,6 +139,71 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 
 > **PE faithfulness**: 16,284 / 16,306 mate alignments exactly match STAR (same position, CIGAR, MAPQ, proper-pair flag, and NH tag). 475 diffs excluded as tie-breaking differences (same MAPQ+NH, different repeat copy chosen).
 
+## Performance & Benchmarks
+
+Two single-cell benchmarks: a **mouse** three-way against STARsolo and CellRanger
+(throughput on a compute-bound run), and a **human** run that is memory-bound,
+where the sparse suffix array is the deciding factor.
+
+### Mouse — 5k PBMC, three-way vs STARsolo and CellRanger
+
+Single-cell (STARsolo) throughput and memory, benchmarked native x86_64 against
+**STARsolo 2.7.11b** and **CellRanger 10.0.0** on a real 10x dataset
+(`5k_Mouse_PBMCs_5p_gem-x_GEX`, 5′ GEM-X, GRCm39-2024-A reference). All three
+tools ran on the **same EC2 instance, same NVMe-staged inputs, 10 threads, page
+cache dropped between reps, no BAM output** — the only fair substrate, since
+CellRanger is x86-only and STAR can't run natively on Apple Silicon. Harness:
+[`test/aws/`](test/aws/).
+
+| Tool | Wall time | Peak RSS | Cells called | Genes detected |
+|------|-----------|----------|--------------|----------------|
+| STARsolo 2.7.11b | **87 s** | 28.3 GB | 4,061 | 15,439 |
+| rustar-aligner | 121 s | 25.7 GB | 3,689 | 16,284 |
+| rustar-aligner `--genomeSAsparseD 2` | 119 s | **17.7 GB** | 3,692 | 16,311 |
+| CellRanger 10.0.0 | 347 s | 13.1 GB | 3,858 | 16,858 |
+
+- **Correctness**: rustar-aligner's `Solo.out/Gene/raw` count matrix is
+  **byte-identical to STARsolo's** on the CellRanger-style flag set (verified
+  deterministically, 3/3 runs). Differing "cells called" / "genes detected"
+  reflect the cell-calling filter (`EmptyDrops_CR` Monte-Carlo), not the counts.
+- **Memory**: `--genomeSAsparseD 2` (sparse suffix array, byte-identical to
+  STAR's own D=2 SA) trades ~2% wall time for a **31% smaller peak RSS**,
+  giving rustar the smallest memory footprint of any suffix-array aligner here.
+  rustar's reported RSS includes reclaimable mmap'd index pages, so it overstates
+  real memory pressure.
+- **Since this run**: a segment-tree gene-assignment optimization (O(log n + k)
+  overlap query, replacing STAR's linear scan) landed in `main` and independently
+  measured a **further ~14% reduction in rustar's solo wall time (→ ~105 s)** on
+  the same dataset/instance — the table above predates it and is a conservative
+  floor. Count matrices are unchanged.
+
+### Human — GRCh38, memory-bound (sparse vs dense index)
+
+A full human snRNA-seq sample (GSE163577 `SRR13278444`, ~155M reads, 10x 3′ v3,
+GRCh38) hits a different bottleneck. The **32 GB dense index does not stay
+resident in 48 GB RAM**, so the run is dominated by page faults rather than
+alignment — a production dense run took **9.5 h with 558M page faults** (≈4 h of
+it kernel time). The **sparse suffix array (`--genomeSAsparseD 2`)** shrinks the
+index to **16 GB** so it fits in RAM. Measured on a 500k-read subset of the same
+sample (8 threads, warm cache):
+
+| rustar-aligner (500k subset) | Wall | Page faults | Unique mapping |
+|------------------------------|------|-------------|----------------|
+| dense index (32 GB)          | 165–460 s\* | 5.1 M | 77.0% |
+| `--genomeSAsparseD 2` (16 GB) | **54 s** | **0.32 M** | 77.6% |
+
+<sub>\*dense wall swings with cache pressure because the 32 GB index can't stay
+resident; the 16 GB sparse index is stable at ~54 s.</sub>
+
+- **~3× faster resident, up to ~8× when the dense index is paging**, with **16×
+  fewer page faults** — purely because 16 GB fits in 48 GB RAM and 32 GB does not.
+- **Sensitivity is equal** (sparse 77.6% vs dense 77.0% unique). Sparse output is
+  byte-identical to STAR's own **D=2** SA (not to a dense D=1 run), so counts
+  differ from a dense run by ~1% of matrix entries — run a whole cohort on one
+  index for consistency.
+- **Takeaway**: on a RAM-constrained box, index size — not raw aligner speed — is
+  the dominant cost for a human genome; `--genomeSAsparseD 2` is the lever.
+
 ## Supported Features
 
 - Single-end and paired-end alignment with mate rescue
@@ -130,6 +215,8 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 - Chimeric alignment detection — SE and PE, 4-tier pipeline: transcript-pair search, multi-cluster, soft-clip re-seeding, residual outer re-seeding for multi-junction fusions (`--chimSegmentMin`)
 - Gene-level read counting (`--quantMode GeneCounts` → `ReadsPerGene.out.tab`)
 - Transcriptome-coordinate SAM output (`--quantMode TranscriptomeSAM`)
+- **Single-cell quantification (STARsolo)** — `--soloType CB_UMI_Simple`, `CB_UMI_Complex` (multi-segment barcodes), and `SmartSeq` (plate-based, SE + PE); features `Gene`, `GeneFull` (pre-mRNA), `SJ`, and `Velocyto` (spliced/unspliced/ambiguous); barcode correction (`--soloCBmatchWLtype` Exact/1MM/1MM_multi/…), UMI dedup (`--soloUMIdedup` 1MM_All/1MM_CR/1MM_Directional/…), multi-gene UMI filtering, multi-mapper resolution (`--soloMultiMappers` Uniform/PropUnique/EM/Rescue), cell calling (`--soloCellFilter` CellRanger2.2/TopCells/EmptyDrops_CR), gzip output, and `Summary.csv` — writes STARsolo-compatible `Solo.out/<feature>/{raw,filtered}/{matrix.mtx, barcodes.tsv, features.tsv}`
+- Sparse suffix array (`--genomeSAsparseD`) for reduced index memory
 - Post-alignment read filtering (`--outFilterType BySJout`)
 - Splice junction output (`SJ.out.tab`)
 - Unmapped read output to FASTQ (`--outReadsUnmapped Fastx` → `Unmapped.out.mate1` / `mate2`)
@@ -146,7 +233,10 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 
 ## Known Limitations
 
-- No STARsolo single-cell features (Phase 14, deferred)
+- Solo cell-calling counts can differ from STARsolo by a few cells due to the
+  Monte-Carlo `EmptyDrops_CR` rescue; the underlying count matrix is identical.
+- A handful of SE/PE tie-breaking differences vs STAR remain (verified genuine
+  ties; see the accuracy tables above and [ROADMAP.md](ROADMAP.md)).
 
 See [ROADMAP.md](ROADMAP.md) for detailed implementation tracking.
 

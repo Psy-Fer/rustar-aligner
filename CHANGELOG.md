@@ -13,6 +13,27 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Features
 
+- **STARsolo single-cell quantification (`--soloType`)** — the 10x
+  Chromium / plate-based count-matrix pipeline, ported from STAR and
+  verified against real STARsolo (#90).
+
+  - Chemistries: `CB_UMI_Simple` (10x 3'/5'), `CB_UMI_Complex`
+    (multi-segment CB), and `SmartSeq` (manifest-driven, SE read counts
+    / PE fragment counts).
+  - Features: `Gene`, `GeneFull` (pre-mRNA), `SJ` (splice-junction
+    counts), and `Velocyto` (spliced/unspliced/ambiguous matrices for
+    RNA velocity).
+  - Barcode correction: all `--soloCBmatchWLtype` modes
+    (`Exact`/`1MM`/`1MM_multi`/`1MM_multi_pseudocounts`/
+    `1MM_multi_Nbase_pseudocounts`); all `--soloUMIdedup` and
+    `--soloUMIfiltering` modes; real-valued `--soloMultiMappers`
+    (`Uniform`/`PropUnique`/`Rescue`/`EM`).
+  - Output: `raw/` + `filtered/` matrices, `EmptyDrops_CR` cell calling,
+    CellRanger-style `Summary.csv`, and `--soloOutGzip`.
+
+- **`--outSAMattributes GX GN`** — per-read gene-id / gene-name SAM tags
+  for the solo `Gene` assignment.
+
 - **`genomeGenerate` peak RSS cut from ~113 GB → ~11 GB** on the human
   genome (GRCh38, 32 threads). The construction pipeline no longer
   materialises three large intermediates that were dominating the peak:
@@ -75,6 +96,20 @@ Sections commonly used: Features, Bug fixes, Other changes.
 - **mimalloc as the global allocator**. Lower per-allocation cost than
   glibc's malloc and per-thread heaps that return whole segments to
   the OS when abandoned, so allocator cache size stays bounded.
+
+### Bug fixes
+
+- **STARsolo `Gene` assignment now requires exon concordance**, matching
+  STARsolo: a read counts toward a gene only when every aligned block
+  lies within the gene's exons, rather than merely overlapping one. This
+  removes over-assignment of reads that extend past an exon boundary into
+  an intron. On the mouse-chr19 differential test the `Gene` count matrix
+  now matches STAR 2.7.11b (raw matrix identical apart from the
+  multimapper tie-break tail that even a byte-faithful reimplementation
+  cannot reproduce).
+- **STARsolo `features.tsv` column 2 now emits the GTF `gene_name`**
+  (symbol), with the STAR gene_id fallback, instead of duplicating the
+  gene_id.
 
 ### Bumps
 
