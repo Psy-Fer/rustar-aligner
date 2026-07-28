@@ -132,11 +132,16 @@ jobs:
             target: aarch64-unknown-linux-gnu
             pgo: true
 
-          # Linux aarch64 with SVE (Graviton 3+, Axion, Grace)
+          # Linux aarch64 with SVE (Graviton 3+, Axion, Grace).
+          # PGO trains at the generic armv8-a baseline because the SVE (neoverse-v1)
+          # instrumented binary would SIGILL on any aarch64 runner without SVE. The
+          # shipped binary is still built at neoverse-v1 (profiles transfer across
+          # -Ctarget-cpu levels). Same mechanism as linux-x86_64-v4.
           - name: linux-aarch64-neoverse-v1
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             target_cpu: neoverse-v1
+            pgo_train_cpu: generic
             pgo: true
 
           # macOS x86_64 (cross-compiled on Apple Silicon runner)
