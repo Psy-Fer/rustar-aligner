@@ -114,11 +114,16 @@ jobs:
             target_cpu: x86-64-v3
             pgo: true
 
-          # Linux x86_64 with AVX-512 (x86-64-v4)
+          # Linux x86_64 with AVX-512 (x86-64-v4).
+          # PGO trains at v3 (AVX2) because GitHub runners do not reliably have
+          # AVX-512 — running a v4-compiled instrumented binary SIGILLs (exit
+          # 132). The shipped binary is still built at v4 (profiles transfer
+          # across -Ctarget-cpu levels). See scripts/pgo-build.sh.
           - name: linux-x86_64-v4
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             target_cpu: x86-64-v4
+            pgo_train_cpu: x86-64-v3
             pgo: true
 
           # Linux aarch64 (native arm64 runner, baseline)
@@ -127,11 +132,16 @@ jobs:
             target: aarch64-unknown-linux-gnu
             pgo: true
 
-          # Linux aarch64 with SVE (Graviton 3+, Axion, Grace)
+          # Linux aarch64 with SVE (Graviton 3+, Axion, Grace).
+          # PGO trains at the generic armv8-a baseline because the SVE (neoverse-v1)
+          # instrumented binary would SIGILL on any aarch64 runner without SVE. The
+          # shipped binary is still built at neoverse-v1 (profiles transfer across
+          # -Ctarget-cpu levels). Same mechanism as linux-x86_64-v4.
           - name: linux-aarch64-neoverse-v1
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             target_cpu: neoverse-v1
+            pgo_train_cpu: generic
             pgo: true
 
           # macOS x86_64 (cross-compiled on Apple Silicon runner)
@@ -182,9 +192,15 @@ jobs:
             --genomeSAindexNbases 8 --runThreadN 2
           PGO_TARGET="${{ matrix.target }}" \
           PGO_EXTRA_RUSTFLAGS="${TARGET_CPU:+-Ctarget-cpu=$TARGET_CPU}" \
+          PGO_TRAIN_EXTRA_RUSTFLAGS="${PGO_TRAIN_CPU:+-Ctarget-cpu=$PGO_TRAIN_CPU}" \
             bash scripts/pgo-build.sh "$IDX_DIR" "$FIXTURE_DIR/reads.fastq" 50000
         env:
           TARGET_CPU: ${{ matrix.target_cpu || '' }}
+          # ISA for the instrumented/training binary that actually runs on the
+          # build machine. Falls back to the ship CPU when unset; overridden to
+          # a runner-safe level (e.g. v3) for targets whose ISA the runner may
+          # lack (v4/AVX-512).
+          PGO_TRAIN_CPU: ${{ matrix.pgo_train_cpu || matrix.target_cpu || '' }}
 
       - name: Build
         if: ${{ !matrix.pgo }}

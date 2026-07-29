@@ -106,6 +106,54 @@ impl std::fmt::Display for IntronMotifFilter {
 }
 
 // ---------------------------------------------------------------------------
+// Read-end alignment type (alignEndsType)
+// ---------------------------------------------------------------------------
+
+/// Read-end extension policy (`--alignEndsType`). Mirrors STAR's
+/// `alignEndsType.ext[iMate][iEnd]` boolean matrix, where `iEnd == 0` is the
+/// read 5' end and `iEnd == 1` the 3' end. `true` forces full end-to-end
+/// extension of that end (no terminal soft-clip); `false` is local alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlignEndsType {
+    /// `ext[iMate][iEnd]`: force full extension of mate `iMate`'s `iEnd` end.
+    pub ext: [[bool; 2]; 2],
+}
+
+impl Default for AlignEndsType {
+    /// `Local` — no forced extension on any end.
+    fn default() -> Self {
+        Self {
+            ext: [[false; 2]; 2],
+        }
+    }
+}
+
+impl std::str::FromStr for AlignEndsType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // STAR Parameters.cpp: ext[iMate][iEnd], iEnd 0 = 5', 1 = 3'.
+        let mut ext = [[false; 2]; 2];
+        match s {
+            "Local" => {}
+            "EndToEnd" => ext = [[true, true], [true, true]],
+            "Extend5pOfRead1" => ext[0][0] = true,
+            "Extend5pOfReads12" => {
+                ext[0][0] = true;
+                ext[1][0] = true;
+            }
+            "Extend3pOfRead1" => ext[0][1] = true,
+            other => {
+                return Err(format!(
+                    "unknown/unimplemented value for --alignEndsType: '{other}'; expected \
+                     'Local', 'EndToEnd', 'Extend5pOfRead1', 'Extend5pOfReads12', or 'Extend3pOfRead1'"
+                ));
+            }
+        }
+        Ok(Self { ext })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Intron strand filter enum
 // ---------------------------------------------------------------------------
 
@@ -587,6 +635,12 @@ pub struct Parameters {
     #[arg(long = "outSAMstrandField", default_value = "None")]
     pub out_sam_strand_field: String,
 
+    /// SAM output order: `Paired` (default) or `PairedKeepInputOrder`. rustar-aligner
+    /// always emits records in input (FASTQ) order regardless of thread count, so both
+    /// values behave identically; the flag is accepted for STAR/pipeline compatibility.
+    #[arg(long = "outSAMorder", default_value = "Paired")]
+    pub out_sam_order: String,
+
     /// SAM optional-tag set (`Standard`, `All`, `None`, or any combination
     /// of NH HI AS NM nM MD jM jI XS RG). Parsed into a bitflags struct.
     #[command(flatten)]
@@ -728,6 +782,12 @@ pub struct Parameters {
     /// Max genomic distance between mates; 0 = auto
     #[arg(long = "alignMatesGapMax", default_value_t = 0)]
     pub align_mates_gap_max: u32,
+
+    /// Read-end alignment mode: `Local` (default, soft-clip allowed),
+    /// `EndToEnd` (force full extension, no soft-clip), `Extend5pOfRead1`,
+    /// `Extend5pOfReads12`, or `Extend3pOfRead1`.
+    #[arg(long = "alignEndsType", default_value = "Local")]
+    pub align_ends_type: String,
 
     /// Min overlap (bases) between mates required to trigger merge-and-realign; 0 = off
     #[arg(long = "peOverlapNbasesMin", default_value_t = 0)]
@@ -1456,6 +1516,23 @@ impl Parameters {
             params.out_sam_attributes |= SamAttributes::XS;
         } else {
             params.out_sam_attributes.remove(SamAttributes::XS);
+        }
+
+        // --alignEndsType: reject unknown/unimplemented values up front.
+        if let Err(msg) = params.align_ends_type.parse::<AlignEndsType>() {
+            return Err(command.error(ErrorKind::InvalidValue, msg));
+        }
+
+        // --outSAMorder: rustar-aligner always preserves input order, so both STAR
+        // values are accepted and behave identically. Reject anything else.
+        if params.out_sam_order != "Paired" && params.out_sam_order != "PairedKeepInputOrder" {
+            return Err(command.error(
+                ErrorKind::InvalidValue,
+                format!(
+                    "unknown --outSAMorder '{}'; expected 'Paired' or 'PairedKeepInputOrder'",
+                    params.out_sam_order
+                ),
+            ));
         }
 
         // quantMode TranscriptomeSAM requires transcript annotations —
@@ -2466,6 +2543,53 @@ mod tests {
         assert!(parse_mem_bytes("1X").is_err());
         assert!(parse_mem_bytes("").is_err());
         assert!(parse_mem_bytes("-1G").is_err());
+    }
+
+    #[test]
+    fn align_ends_type_parses_ext_matrix() {
+        use std::str::FromStr;
+        assert_eq!(
+            AlignEndsType::from_str("Local").unwrap().ext,
+            [[false; 2]; 2]
+        );
+        assert_eq!(
+            AlignEndsType::from_str("EndToEnd").unwrap().ext,
+            [[true, true], [true, true]]
+        );
+        assert_eq!(
+            AlignEndsType::from_str("Extend5pOfRead1").unwrap().ext,
+            [[true, false], [false, false]]
+        );
+        assert_eq!(
+            AlignEndsType::from_str("Extend5pOfReads12").unwrap().ext,
+            [[true, false], [true, false]]
+        );
+        assert_eq!(
+            AlignEndsType::from_str("Extend3pOfRead1").unwrap().ext,
+            [[false, true], [false, false]]
+        );
+        assert!(AlignEndsType::from_str("Bogus").is_err());
+    }
+
+    #[test]
+    fn out_sam_order_accepts_star_values_rejects_others() {
+        assert!(try_parse(&["--readFilesIn", "r.fq", "--outSAMorder", "Paired"]).is_ok());
+        assert!(
+            try_parse(&[
+                "--readFilesIn",
+                "r.fq",
+                "--outSAMorder",
+                "PairedKeepInputOrder"
+            ])
+            .is_ok()
+        );
+        assert!(try_parse(&["--readFilesIn", "r.fq", "--outSAMorder", "Nope"]).is_err());
+    }
+
+    #[test]
+    fn align_ends_type_rejected_at_cli() {
+        assert!(try_parse(&["--readFilesIn", "r.fq", "--alignEndsType", "EndToEnd"]).is_ok());
+        assert!(try_parse(&["--readFilesIn", "r.fq", "--alignEndsType", "Bogus"]).is_err());
     }
 
     #[test]

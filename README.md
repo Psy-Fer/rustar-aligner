@@ -207,6 +207,7 @@ resident; the 16 GB sparse index is stable at ~54 s.</sub>
 ## Supported Features
 
 - Single-end and paired-end alignment with mate rescue
+- Read-end alignment mode (`--alignEndsType Local` (default) / `EndToEnd` / `Extend5pOfRead1` / `Extend5pOfReads12` / `Extend3pOfRead1`)
 - SAM, unsorted BAM, and coordinate-sorted BAM output (`--outSAMtype SAM`, `BAM Unsorted`, or `BAM SortedByCoordinate`)
 - Multi-threaded parallel alignment (`--runThreadN`)
 - GTF-based junction annotation with scoring bonus (`--sjdbGTFfile`)
@@ -226,6 +227,7 @@ resident; the 16 GB sparse index is stable at ~54 s.</sub>
 - Unmapped read output to FASTQ (`--outReadsUnmapped Fastx` → `Unmapped.out.mate1` / `mate2`)
 - Gzip-compressed FASTQ input (`--readFilesCommand zcat`)
 - Read group tags (`--outSAMattrRGline`)
+- Deterministic input-order output regardless of thread count (`--outSAMorder Paired` / `PairedKeepInputOrder`, both accepted; rustar always preserves FASTQ order)
 - Deterministic in-tree RNG for reproducible tie-breaking (`--runRNGseed`; no `rand` dependency)
 - SAM optional tags: NH, HI, AS, nM, NM, XS, jM, jI, MD (default `NH HI AS nM` matches STAR; `NM` opt-in)
 - `--outSAMattributes` control (Standard/All/None/explicit list)

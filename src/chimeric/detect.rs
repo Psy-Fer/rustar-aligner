@@ -662,6 +662,32 @@ pub fn detect_chimeric_old(
     params: &Parameters,
     index: &GenomeIndex,
 ) -> Result<Vec<ChimericAlignment>, Error> {
+    // SE / per-mate PE pool: no combined-read mate boundary, so diffMates never applies.
+    detect_chimeric_old_impl(
+        all_transcripts,
+        tr_best,
+        read_seq,
+        read_name,
+        params,
+        index,
+        None,
+    )
+}
+
+/// `detect_chimeric_old` with an optional combined-read mate boundary (`read_length[0]`
+/// in ro-space). When a candidate segment lies in a different mate than the primary
+/// segment (STAR's `diffMates`), the read-gap check is waived — matching
+/// `ReadAlign_chimericDetectionOld.cpp` lines 67-71.
+#[allow(clippy::too_many_arguments)]
+pub fn detect_chimeric_old_impl(
+    all_transcripts: &[Transcript],
+    tr_best: &Transcript,
+    read_seq: &[u8],
+    read_name: &str,
+    params: &Parameters,
+    index: &GenomeIndex,
+    mate_boundary: Option<usize>,
+) -> Result<Vec<ChimericAlignment>, Error> {
     let read_len = read_seq.len();
     let min_seg = params.chim_segment_min as usize;
     let score_min = params.chim_score_min;
@@ -786,10 +812,15 @@ pub fn detect_chimeric_old(
             continue;
         }
 
-        // Read gap check: the two segments must be close enough in read space
-        // (or come from different mates in PE, handled by diffMates).
-        // For SE, diffMates is never true.
-        let gap_ok = (ro_end1 + gap_max + 1 >= ro_start2) && (ro_end2 + gap_max + 1 >= ro_start1);
+        // Read gap check: the two segments must be close enough in read space —
+        // UNLESS they come from different mates (STAR's `diffMates`), in which case
+        // the inter-mate fragment gap is expected and the check is waived
+        // (ReadAlign_chimericDetectionOld.cpp:67-71). `diffMates` requires a combined
+        // read with a known mate boundary; it is always false for SE / per-mate pools.
+        let diff_mates = mate_boundary
+            .is_some_and(|b| (ro_end1 < b && ro_start2 >= b) || (ro_end2 < b && ro_start1 >= b));
+        let gap_ok = diff_mates
+            || ((ro_end1 + gap_max + 1 >= ro_start2) && (ro_end2 + gap_max + 1 >= ro_start1));
         if !gap_ok {
             continue;
         }
@@ -841,6 +872,10 @@ pub fn detect_chimeric_old(
     if chim_score_best < score_min {
         return Ok(vec![]);
     }
+    // Score-drop gate (STAR chimericDetectionOld.cpp:99, `readLength[0]+readLength[1]`).
+    // `read_len` is the length of the read passed in, so this scales correctly for both
+    // modes: per-mate length for the per-mate PE pools (an intra-mate chimera spans one
+    // mate), and the combined length when a combined read is supplied via `mate_boundary`.
     if chim_score_best + score_drop_max < read_len as i32 {
         return Ok(vec![]);
     }
@@ -1417,5 +1452,44 @@ mod tests {
                 .unwrap();
         // Score drop filter: 100 + 5 >= 100 → passes; uniqueness: score_separation=200, next=-inf → passes
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_detect_chimeric_old_diff_mates_waives_gap() {
+        // Combined read len 100, mate boundary at 50: mate1=[0..50), mate2=[50..100).
+        // Primary covers read[0..40] (mate1, chr0); partner covers read[60..100] (mate2, chr1).
+        // The 20bp inter-segment gap exceeds chimSegmentReadGapMax (0), so the standard
+        // gap check fails — but the segments are in different mates, so STAR's diffMates
+        // waives it. Without a mate boundary the chimera is rejected; with one it is found.
+        let params = params(&[
+            "--chimSegmentMin",
+            "15",
+            "--chimScoreDropMax",
+            "100",
+            "--chimScoreSeparation",
+            "200",
+            "--chimJunctionOverhangMin",
+            "10",
+        ]);
+        let index = make_test_index();
+        let read_len = 100usize;
+        let t_main = make_clipped_transcript(0, 0, false, read_len, 0, 60); // read[0..40], mate1
+        let t_partner = make_clipped_transcript(1, 0, false, read_len, 60, 0); // read[60..100], mate2
+        let all = vec![t_main.clone(), t_partner];
+        let read_seq = read_seq_n(read_len);
+
+        // No boundary (SE / per-mate pool): gap check enforced → rejected.
+        let without = detect_chimeric_old(&all, &t_main, &read_seq, "r", &params, &index).unwrap();
+        assert!(
+            without.is_empty(),
+            "gap check should reject without diffMates"
+        );
+
+        // Combined read with mate boundary at 50: diffMates waives the gap → chimera found.
+        let with =
+            detect_chimeric_old_impl(&all, &t_main, &read_seq, "r", &params, &index, Some(50))
+                .unwrap();
+        assert_eq!(with.len(), 1, "diffMates should waive the inter-mate gap");
+        assert_ne!(with[0].donor.chr_idx, with[0].acceptor.chr_idx);
     }
 }
