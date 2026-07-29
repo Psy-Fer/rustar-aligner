@@ -1096,20 +1096,60 @@ fn emptydrops_called(
         return Ok(called);
     }
 
-    // Ambient probabilities with a Good-Turing P0 unseen-mass correction.
-    let n1 = ambient.iter().filter(|&&x| (x - 1.0).abs() < 0.5).count() as f64;
-    let p0 = (n1 / amb_total).clamp(1e-12, 0.5);
-    let n_zero = ambient.iter().filter(|&&x| x == 0.0).count().max(1) as f64;
-    let amb_p: Vec<f64> = ambient
-        .iter()
-        .map(|&x| {
-            if x > 0.0 {
-                (1.0 - p0) * x / amb_total
-            } else {
-                p0 / n_zero
+    // Ambient probabilities, smoothed by Simple Good-Turing as CellRanger's
+    // EmptyDrops_CR does. The raw ambient counts are a small sample, so a gene
+    // seen twice there is not twice as likely as one seen once; SGT fits the
+    // frequency spectrum and reserves mass for genes the sample missed
+    // entirely. The previous approximation here reserved mass from the
+    // singleton rate alone and spread the rest in proportion to raw counts,
+    // which is the right shape but the wrong numbers.
+    let amb_p: Vec<f64> = {
+        // Frequency of frequencies over the integer ambient counts.
+        let counts: Vec<u32> = ambient.iter().map(|&x| x as u32).collect();
+        let mut fof: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+        for &c in &counts {
+            *fof.entry(c).or_insert(0) += 1;
+        }
+        let n_zero = fof.get(&0).copied().unwrap_or(0);
+
+        let mut sgt = crate::solo::sgt::Sgt::new();
+        for (&freq, &n) in &fof {
+            if freq != 0 {
+                sgt.add(freq, n);
             }
-        })
-        .collect();
+        }
+        let fitted = sgt.analyse();
+
+        // Per-gene probability. A gene absent from the ambient set shares the
+        // reserved unseen mass; one present takes its smoothed estimate. When
+        // the spectrum is too small to fit (D17), there is no reserved mass and
+        // the raw proportions are all that is left.
+        let unseen_each = if n_zero > 0 {
+            sgt.pzero() / f64::from(n_zero)
+        } else {
+            0.0
+        };
+        let raw: Vec<f64> = counts
+            .iter()
+            .map(|&c| {
+                if c == 0 {
+                    unseen_each
+                } else if fitted {
+                    sgt.estimate(c).unwrap_or(f64::from(c) / amb_total)
+                } else {
+                    f64::from(c) / amb_total
+                }
+            })
+            .collect();
+        // Renormalise: the smoothed estimates are per-event probabilities and
+        // only sum to one over the whole spectrum, not over this gene set.
+        let total: f64 = raw.iter().sum();
+        if total > 0.0 {
+            raw.into_iter().map(|p| p / total).collect()
+        } else {
+            raw
+        }
+    };
     let amb_logp: Vec<f64> = amb_p.iter().map(|&p| p.max(1e-300).ln()).collect();
 
     // Observed multinomial log-prob per candidate.
@@ -1141,17 +1181,17 @@ fn emptydrops_called(
     // log-prob at each count; compare each candidate against sim[*][its total].
     let nonzero: Vec<usize> = (0..n_features).filter(|&g| amb_p[g] > 0.0).collect();
     let weights: Vec<f64> = nonzero.iter().map(|&g| amb_p[g]).collect();
-    // Ambient categorical sampler: cumulative weights + splitmix64 (crate::rng).
-    // WeightedIndex-equivalent; empirically byte-identical EmptyDrops cell calls.
-    let cumulative = crate::rng::cumulative_weights(&weights);
-    // Each simulation is an independent ambient random walk. Seed a dedicated RNG
-    // per simulation (splitmix-derived from the base seed) so the result is
-    // deterministic regardless of how the work is scheduled across threads, then
-    // run the simulations in parallel. Each walk records the running log-prob at
-    // every count level; `walks[s][k]` is the log-prob of simulation `s` after `k`
-    // draws. (This matches STAR's per-thread-RNG approach; the per-sim seeding
-    // gives different draws than a single sequential stream, but the same
-    // distribution — p-values are stable to Monte-Carlo error.)
+    // The ambient sampler is STAR's, which is libc++'s: `std::mt19937` drawn
+    // through `std::discrete_distribution`. Both are implementation-defined in
+    // the parts that decide which category a draw lands in, so "a correct
+    // categorical sampler" is not enough to reproduce STAR's cell calls —
+    // it has to be that one. See `solo::libcxx_rng`.
+    let dist = crate::solo::libcxx_rng::DiscreteDistribution::new(&weights);
+    // A fresh generator per simulation, seeded `19760110 * (isim + 1)` as STAR
+    // seeds it. No shared state, so the walks can run in any order and on any
+    // number of threads and still produce the same p-values. Each walk records
+    // the running log-prob at every count level; `walks[s][k]` is simulation
+    // `s` after `k` draws.
     use rayon::prelude::*;
     const BASE_SEED: u64 = 19_760_110;
     let walks: Vec<Vec<f64>> = (0..sim_n)
@@ -1159,14 +1199,14 @@ fn emptydrops_called(
         .map_init(
             || (vec![0u32; n_features], Vec::<usize>::new()),
             |(curr, touched), s| {
-                let seed = BASE_SEED ^ (s as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                let mut rng = crate::rng::SplitMix64::seed(seed);
+                let seed = BASE_SEED.wrapping_mul(s as u64 + 1) as u32;
+                let mut rng = crate::solo::libcxx_rng::Mt19937::new(seed);
                 touched.clear();
                 let mut walk = Vec::with_capacity(max_count + 1);
                 walk.push(0.0);
                 let mut lp = 0f64;
                 for ic in 1..=max_count {
-                    let gi = nonzero[crate::rng::sample_cumulative(&cumulative, &mut rng)];
+                    let gi = nonzero[dist.sample(&mut rng)];
                     if curr[gi] == 0 {
                         touched.push(gi);
                     }

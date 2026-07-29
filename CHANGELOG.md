@@ -114,6 +114,15 @@ Sections commonly used: Features, Bug fixes, Other changes.
   and a matrix produced elsewhere should be callable too. It streams
   the matrix into the same form the align path produces, so the filters
   are the identical code rather than a second implementation.
+- **`--soloCellFilter EmptyDrops_CR` now uses CellRanger's actual
+  statistics.** The ambient profile is smoothed with Simple Good-Turing,
+  as CellRanger and STAR do, instead of an approximation that reserved
+  unseen mass from the singleton rate and spread the remainder in
+  proportion to raw counts. The Monte-Carlo null is drawn with libc++'s
+  `std::mt19937` and `std::discrete_distribution`, seeded
+  `19760110 * (isim + 1)` per simulation as STAR seeds it, replacing a
+  SplitMix64 stream that could not agree with STAR's over an arbitrary
+  number of draws. Cell calls move as a result.
 
 ### Bug fixes
 
