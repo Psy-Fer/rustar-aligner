@@ -1129,6 +1129,10 @@ pub struct Parameters {
     /// `CellReads.stats`. `-` (the default) names none.
     #[arg(long = "genomeChrSetMitochondrial", num_args = 1.., default_values_t = vec!["-".to_string()])]
     pub genome_chr_set_mitochondrial: Vec<String>,
+    /// Two-column `CB cluster` file assigning cells to clusters, for
+    /// `--soloFeatures Transcript3p`.
+    #[arg(long = "soloClusterCBfile")]
+    pub solo_cluster_cb_file: Option<PathBuf>,
 
     /// Cell-calling / matrix filtering: None, CellRanger2.2, EmptyDrops_CR, TopCells.
     #[arg(long = "soloCellFilter", num_args = 1.., default_values_t = vec!["CellRanger2.2".to_string(), "3000".to_string(), "0.99".to_string(), "10".to_string()])]
@@ -1663,15 +1667,15 @@ impl Parameters {
                     ));
                 }
             }
-            // Gene / GeneFull / SJ / Velocyto are implemented.
+            // Gene / GeneFull / SJ / Velocyto / Transcript3p are implemented.
             for f in &params.solo_features {
-                if !matches!(f.as_str(), "SJ" | "Velocyto")
+                if !matches!(f.as_str(), "SJ" | "Velocyto" | "Transcript3p")
                     && f.parse::<crate::solo::SoloFeature>().is_err()
                 {
                     return Err(command.error(
                         ErrorKind::InvalidValue,
                         format!(
-                            "unsupported --soloFeatures '{f}'; supported: Gene, GeneFull, SJ, Velocyto"
+                            "unsupported --soloFeatures '{f}'; supported: Gene, GeneFull, SJ, Velocyto, Transcript3p"
                         ),
                     ));
                 }
@@ -1783,6 +1787,16 @@ impl Parameters {
                         "unknown --soloCellReadStats '{}'; expected CB or None",
                         params.solo_cell_read_stats
                     ),
+                ));
+            }
+            // Transcript3p quantifies per cluster, so it needs the clustering.
+            if params.solo_features.iter().any(|f| f == "Transcript3p")
+                && params.solo_cluster_cb_file.is_none()
+            {
+                return Err(command.error(
+                    ErrorKind::MissingRequiredArgument,
+                    "--soloFeatures Transcript3p requires --soloClusterCBfile: the EM runs \
+                     per cluster of cells, since one cell has too few UMIs to resolve isoforms",
                 ));
             }
             // Validate --clipAdapterType.

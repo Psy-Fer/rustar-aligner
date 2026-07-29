@@ -1521,6 +1521,47 @@ pub fn write_gene_matrix(
         }
     }
 
+    // Transcript3p: rows are transcripts, columns are clusters rather than
+    // cells, since the isoform EM needs more UMIs than one cell provides.
+    if let (Some(acc), Some(tx)) = (&ctx.transcript3p, &ctx.transcriptome) {
+        let dir = params.output_path(&format!("{solo_dir}Transcript3p/raw/"));
+        std::fs::create_dir_all(&dir).map_err(|e| Error::io(e, &dir))?;
+
+        let cluster_cb = match &params.solo_cluster_cb_file {
+            Some(path) => {
+                let text = std::fs::read_to_string(path).map_err(|e| Error::io(e, path))?;
+                crate::solo::transcript3p::load_cluster_cb(&text, |cb| {
+                    ctx.whitelist.index_of_barcode(cb.as_bytes())
+                })
+            }
+            // Validation requires the file, so this is unreachable in practice;
+            // an empty map quantifies nothing rather than inventing a cluster.
+            None => std::collections::BTreeMap::new(),
+        };
+
+        let acc = acc.lock().unwrap();
+        let out = crate::solo::transcript3p::quantify(&acc, tx, &cluster_cb);
+        for (name, body) in [
+            (matrix_name.as_str(), &out.matrix),
+            (features_name.as_str(), &out.features),
+            (
+                "transcriptEndDistanceDistribution.txt",
+                &out.distance_distribution,
+            ),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, body).map_err(|e| Error::io(e, &path))?;
+        }
+        log::info!(
+            "STARsolo: wrote Transcript3p/raw ({} transcripts × {} clusters)",
+            tx.n_transcripts(),
+            cluster_cb
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+        );
+    }
+
     // SJ (splice-junction) feature: rows are the SJ.out.tab junctions.
     if ctx.sj_enabled
         && let Some(sjs) = sj_stats
