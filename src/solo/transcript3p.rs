@@ -56,13 +56,6 @@ impl Transcript3pAcc {
         }
         self.records.push((cb, umi, hits));
     }
-
-    pub fn merge(&mut self, other: Self) {
-        for (a, b) in self.dist_count.iter_mut().zip(&other.dist_count) {
-            *a += b;
-        }
-        self.records.extend(other.records);
-    }
 }
 
 /// Every transcript this alignment is concordant with, and the spliced distance
