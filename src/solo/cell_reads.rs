@@ -23,6 +23,9 @@
 //! **values never do** — only which line they appear on. A consumer that reads
 //! this file by barcode rather than by position is unaffected either way, and
 //! sorting by barcode is the only stable thing to do with it.
+//!
+//! Reads are folded in under a mutex held by `SoloContext`, so the order is the
+//! order reads were processed in regardless of thread count.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
@@ -122,24 +125,6 @@ impl CellReadStats {
     /// Record a read whose barcode did not resolve, or whose UMI was rejected.
     pub fn add_no_cb(&mut self, flag: &CellReadFlag) {
         Self::fold(&mut self.no_cb, flag);
-    }
-
-    /// Merge another accumulator in, preserving first-appearance order: the
-    /// per-thread partials are merged in read order, so the combined order is
-    /// the order a single-threaded run would have produced.
-    pub fn merge(&mut self, other: &Self) {
-        for &cb in &other.order {
-            if self.seen.insert(cb) {
-                self.order.push(cb);
-            }
-            let dst = self.cells.entry(cb).or_insert([0; 15]);
-            for (d, s) in dst.iter_mut().zip(&other.cells[&cb]) {
-                *d += s;
-            }
-        }
-        for (d, s) in self.no_cb.iter_mut().zip(&other.no_cb) {
-            *d += s;
-        }
     }
 
     /// Render the file. `umi_gene` gives each cell its final
@@ -299,34 +284,5 @@ mod tests {
         assert_eq!(&rows[0][16..18], ["0", "0"]);
         assert_eq!(rows[1][0], "CB2");
         assert_eq!(&rows[1][16..18], ["17", "5"]);
-    }
-
-    /// Merging partials keeps first-appearance order, so a threaded run and a
-    /// serial one write the same file.
-    #[test]
-    fn merging_partials_preserves_order_and_sums() {
-        let mut a = CellReadStats::new();
-        a.add_cell(5, &flag_perfect_counted());
-        a.add_cell(2, &flag_perfect_counted());
-        let mut b = CellReadStats::new();
-        b.add_cell(2, &flag_perfect_counted());
-        b.add_cell(8, &flag_perfect_counted());
-        b.add_no_cb(&CellReadFlag::default());
-        a.merge(&b);
-
-        let out = a.render(|i| format!("CB{i}"), &BTreeMap::new());
-        let cbs: Vec<&str> = out
-            .lines()
-            .skip(2)
-            .map(|l| l.split('\t').next().unwrap())
-            .collect();
-        assert_eq!(cbs, ["CB8", "CB2", "CB5"]);
-        let cb2: Vec<&str> = out
-            .lines()
-            .find(|l| l.starts_with("CB2\t"))
-            .unwrap()
-            .split('\t')
-            .collect();
-        assert_eq!(cb2[1], "2", "the two partials' reads are summed");
     }
 }
