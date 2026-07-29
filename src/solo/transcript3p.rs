@@ -3,6 +3,15 @@
 //!
 //! STAR `Transcriptome_classifyAlign.cpp` plus `SoloFeature_quantTranscript.cpp`.
 //!
+//! **STAR marks this feature as under development.** In `parametersDefault`
+//! both `Transcript3p` and `--soloClusterCBfile` sit between
+//! `#####UnderDevelopment_begin : not supported - do not use` and
+//! `#####UnderDevelopment_end`, and `STAR --help` prints that banner around
+//! them. The port follows STAR's code, so it inherits whatever that code does,
+//! including its unfinished parts; it is not a stable interface either here or
+//! upstream, and a differential against STAR compares two implementations of
+//! something STAR itself does not support.
+//!
 //! In a 3'-biased assay every read lands near the transcript's 3' end, and how
 //! near is informative: a read 200 bases from the end of one isoform and 4000
 //! from the end of another is evidence for the first. This feature records, per
