@@ -416,8 +416,8 @@ impl Genome {
         // "<argv[0]>   --<name1> <val1>   --<name2> <val2> ...".  We emit
         // the same skeleton using our known-at-invocation parameters.
         // Not exposed for retrospective exact-byte match against an arbitrary
-        // STAR run's commandLineFull — see `docs/genome_params_divergence.md`
-        // for the short list of parameters we echo.
+        // STAR run's commandLineFull — see `DIVERGENCE.md` (§3.1) for the short
+        // list of parameters we echo.
         let fasta_list = params
             .genome_fasta_files
             .iter()
