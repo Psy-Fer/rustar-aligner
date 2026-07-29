@@ -97,6 +97,27 @@ Sections commonly used: Features, Bug fixes, Other changes.
   glibc's malloc and per-thread heaps that return whole segments to
   the OS when abandoned, so allocator cache size stays bounded.
 
+- **`--soloCellFilter EmptyDrops_CR` now uses CellRanger's actual
+  statistics.** The ambient profile is smoothed with Simple Good-Turing,
+  as CellRanger and STAR do, instead of an approximation that reserved
+  unseen mass from the singleton rate and spread the remainder in
+  proportion to raw counts. The Monte-Carlo null is drawn with libc++'s
+  `std::mt19937` and `std::discrete_distribution`, seeded
+  `19760110 * (isim + 1)` per simulation as STAR seeds it, replacing a
+  SplitMix64 stream that could not agree with STAR's over an arbitrary
+  number of draws. Cell calls move as a result.
+
+- **`--soloCellReadStats CB`** writes `Solo.out/<feature>/CellReads.stats`:
+  one row per cell barcode with fifteen counters describing what
+  happened to its reads — barcode match quality, unique or multi
+  genomic mapping, feature assignment, exonic/intronic and their
+  antisense counterparts, mitochondrial, and whether the read reached
+  the matrix — plus the per-cell UMI and gene totals. Reads whose
+  barcode never resolved are summed into a `CBnotInPasslist` row rather
+  than dropped, so the columns account for the whole input.
+  `--genomeChrSetMitochondrial` names the chromosomes behind the `mito`
+  column.
+
 ### Bug fixes
 
 - `--runThreadN 1` ran on every logical core instead of on one. The

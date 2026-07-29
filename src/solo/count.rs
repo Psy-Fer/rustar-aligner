@@ -1224,6 +1224,27 @@ pub fn write_gene_matrix(
             if gzip { " [gzip]" } else { "" },
         );
 
+        // `--soloCellReadStats CB`: the per-cell read summary, alongside the
+        // raw matrix because its UMI and gene columns are the raw totals.
+        if let Some(cell_stats) = &ctx.cell_read_stats {
+            let umi_gene: std::collections::BTreeMap<u32, (u32, u32)> = mstats
+                .cells
+                .iter()
+                .map(|c| (c.cb, (c.n_umis as u32, c.n_genes)))
+                .collect();
+            let path = feature_dir.join("CellReads.stats");
+            let text = cell_stats.lock().unwrap().render(
+                |cb| {
+                    ctx.whitelist
+                        .barcode_string(cb)
+                        .unwrap_or_else(|| cb.to_string())
+                },
+                &umi_gene,
+            );
+            std::fs::write(&path, text).map_err(|e| Error::io(e, &path))?;
+            log::info!("STARsolo: wrote {}/CellReads.stats", feature.dir_name());
+        }
+
         // Filtered (cell-called) matrix per --soloCellFilter. EmptyDrops_CR runs
         // the Monte-Carlo rescue (needs the per-cell profiles in the body).
         let called = if params

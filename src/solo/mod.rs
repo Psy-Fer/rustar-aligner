@@ -9,6 +9,7 @@
 //! The barcode read is the SECOND `--readFilesIn` file (STAR convention:
 //! `--readFilesIn cDNA_read barcode_read`). It is never aligned — only parsed.
 
+pub mod cell_reads;
 pub mod count;
 pub mod gene;
 pub mod smartseq;
@@ -564,6 +565,13 @@ pub struct SoloContext {
     /// `--soloMultiMappers` includes a non-`Unique` method → capture gene-
     /// ambiguous reads for distribution into `UniqueAndMult-*.mtx`.
     pub want_multi: bool,
+    /// `--soloCellReadStats CB`: the per-cell read summary, or `None` when the
+    /// flag is off. Behind a mutex like the other per-read collections; the
+    /// lock is only taken when the flag asks for the file.
+    pub cell_read_stats: Option<Mutex<crate::solo::cell_reads::CellReadStats>>,
+    /// Chromosome indices named by `--genomeChrSetMitochondrial`, for the
+    /// `mito` column.
+    pub mito_chr: std::collections::HashSet<usize>,
 }
 
 /// Per-region read tallies for the `Summary.csv` mapping funnel (uniquely-mapped
@@ -695,6 +703,14 @@ impl SoloContext {
             velocyto_enabled,
             velocyto_records: Mutex::new(Vec::new()),
             want_multi,
+            cell_read_stats: (params.solo_cell_read_stats == "CB")
+                .then(|| Mutex::new(crate::solo::cell_reads::CellReadStats::new())),
+            mito_chr: params
+                .genome_chr_set_mitochondrial
+                .iter()
+                .filter(|n| n.as_str() != "-")
+                .filter_map(|n| genome.chr_name.iter().position(|c| c == n))
+                .collect(),
         })
     }
 
@@ -871,7 +887,65 @@ impl SoloContext {
                 fo
             })
             .collect();
+
+        self.record_cell_read(
+            cb_resolved,
+            &cb_match,
+            n_loci,
+            &class,
+            cdna_transcripts,
+            &out,
+        );
         out
+    }
+
+    /// Fold one read into `CellReads.stats`, when `--soloCellReadStats CB`
+    /// asked for it.
+    ///
+    /// Called at the end of read processing so the counted flags reflect what
+    /// the read actually produced, rather than what it looked eligible for.
+    #[allow(clippy::too_many_arguments)]
+    fn record_cell_read(
+        &self,
+        cb_resolved: Option<u32>,
+        cb_match: &CbMatch,
+        n_loci: usize,
+        class: &crate::solo::gene::ReadClass,
+        transcripts: &[Transcript],
+        out: &SoloReadOutcome,
+    ) {
+        let Some(stats) = &self.cell_read_stats else {
+            return;
+        };
+        let counted_u = out.per_feature.iter().any(|f| f.record.is_some());
+        let counted_m = out.per_feature.iter().any(|f| f.multi_gene.is_some());
+        let feature_u = counted_u || out.per_feature.iter().any(|f| f.multi.is_some());
+        let flag = crate::solo::cell_reads::CellReadFlag {
+            cb_perfect: matches!(cb_match, CbMatch::Exact(_)),
+            cb_mm_unique: matches!(cb_match, CbMatch::Corrected(_)),
+            cb_mm_multiple: matches!(cb_match, CbMatch::Multi(_)),
+            genome_u: n_loci == 1,
+            genome_m: n_loci > 1,
+            feature_u,
+            feature_m: counted_m,
+            // The region columns split by strand: STAR reports an antisense
+            // read under `exonicAS`/`intronicAS`, not under `exonic`/`intronic`.
+            exonic: !class.antisense && class.region == Some(Region::Exonic),
+            intronic: !class.antisense && class.region == Some(Region::Intronic),
+            exonic_as: class.antisense && class.region == Some(Region::Exonic),
+            intronic_as: class.antisense && class.region == Some(Region::Intronic),
+            mito: !self.mito_chr.is_empty()
+                && transcripts
+                    .iter()
+                    .any(|t| self.mito_chr.contains(&t.chr_idx)),
+            counted_u,
+            counted_m,
+        };
+        let mut stats = stats.lock().unwrap();
+        match cb_resolved {
+            Some(cb) => stats.add_cell(cb, &flag),
+            None => stats.add_no_cb(&flag),
+        }
     }
 
     /// Process one 5' paired-end solo read (`--soloBarcodeMate 1`): the barcode is

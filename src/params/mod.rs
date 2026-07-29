@@ -1113,6 +1113,17 @@ pub struct Parameters {
     #[arg(long = "soloCBmatchWLtype", default_value = "1MM_multi")]
     pub solo_cb_match_wl_type: String,
 
+    /// `CB`: write `Solo.out/<feature>/CellReads.stats`, a per-cell-barcode
+    /// summary of what happened to the reads carrying it. `None` (the default)
+    /// writes nothing.
+    #[arg(long = "soloCellReadStats", default_value = "None")]
+    pub solo_cell_read_stats: String,
+
+    /// Chromosome names treated as mitochondrial, for the `mito` column of
+    /// `CellReads.stats`. `-` (the default) names none.
+    #[arg(long = "genomeChrSetMitochondrial", num_args = 1.., default_values_t = vec!["-".to_string()])]
+    pub genome_chr_set_mitochondrial: Vec<String>,
+
     /// Cell-calling / matrix filtering: None, CellRanger2.2, EmptyDrops_CR, TopCells.
     #[arg(long = "soloCellFilter", num_args = 1.., default_values_t = vec!["CellRanger2.2".to_string(), "3000".to_string(), "0.99".to_string(), "10".to_string()])]
     pub solo_cell_filter: Vec<String>,
@@ -1709,6 +1720,16 @@ impl Parameters {
                         ),
                     ));
                 }
+            }
+            // --soloCellReadStats: `CB` is the only value STAR defines.
+            if !matches!(params.solo_cell_read_stats.as_str(), "CB" | "None") {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    format!(
+                        "unknown --soloCellReadStats '{}'; expected CB or None",
+                        params.solo_cell_read_stats
+                    ),
+                ));
             }
             // Validate --clipAdapterType.
             if !matches!(
