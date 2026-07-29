@@ -2024,3 +2024,93 @@ fn test_wasp_samtag() {
         "all 10 unique reads overlapping the het SNV should pass WASP (vW:i:1)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// --runMode soloCellFiltering
+// ---------------------------------------------------------------------------
+
+/// Cell calling is a decision about a matrix, not about reads: the mode takes
+/// an existing raw matrix and writes the called subset, with no genome and no
+/// FASTQ involved.
+#[test]
+fn test_run_mode_solo_cell_filtering_calls_cells_from_a_raw_matrix() {
+    let tmpdir = TempDir::new().unwrap();
+    let raw = tmpdir.path().join("raw");
+    fs::create_dir_all(&raw).unwrap();
+
+    // 20 barcodes: five real cells with 1000 UMIs each, fifteen with 2.
+    let n_features = 50usize;
+    let n_cells = 20usize;
+    let mut entries: Vec<(usize, usize, u64)> = Vec::new();
+    for cb in 1..=n_cells {
+        let per_gene = if cb <= 5 { 100 } else { 1 };
+        let n_genes = if cb <= 5 { 10 } else { 2 };
+        for gene in 1..=n_genes {
+            entries.push((gene, cb, per_gene));
+        }
+    }
+    {
+        let mut f = fs::File::create(raw.join("matrix.mtx")).unwrap();
+        writeln!(f, "%%MatrixMarket matrix coordinate integer general").unwrap();
+        writeln!(f, "%").unwrap();
+        writeln!(f, "{} {} {}", n_features, n_cells, entries.len()).unwrap();
+        for (g, c, v) in &entries {
+            writeln!(f, "{g} {c} {v}").unwrap();
+        }
+    }
+    {
+        let mut f = fs::File::create(raw.join("barcodes.tsv")).unwrap();
+        for cb in 0..n_cells {
+            writeln!(f, "{:016b}", cb).unwrap();
+        }
+    }
+    {
+        let mut f = fs::File::create(raw.join("features.tsv")).unwrap();
+        for g in 0..n_features {
+            writeln!(f, "gene{g}\tGENE{g}\tGene Expression").unwrap();
+        }
+    }
+
+    let out = tmpdir.path().join("filtered/");
+    cargo_bin_cmd!("rustar-aligner")
+        .args([
+            "--runMode",
+            "soloCellFiltering",
+            raw.to_str().unwrap(),
+            out.to_str().unwrap(),
+            "--soloCellFilter",
+            "TopCells",
+            "5",
+        ])
+        .assert()
+        .success();
+
+    let barcodes = fs::read_to_string(out.join("barcodes.tsv")).unwrap();
+    assert_eq!(
+        barcodes.lines().count(),
+        5,
+        "the five deep barcodes are the called cells"
+    );
+
+    let matrix = fs::read_to_string(out.join("matrix.mtx")).unwrap();
+    let header = matrix.lines().nth(2).unwrap();
+    let fields: Vec<&str> = header.split_whitespace().collect();
+    assert_eq!(fields[0], "50", "features are carried through");
+    assert_eq!(fields[1], "5", "columns are the called cells");
+    assert_eq!(fields[2], "50", "10 genes × 5 cells");
+
+    assert!(
+        out.join("features.tsv").exists(),
+        "the feature list travels with the matrix"
+    );
+}
+
+/// The mode needs both paths; asking for it without them is refused rather
+/// than run against a guess.
+#[test]
+fn test_run_mode_solo_cell_filtering_requires_its_paths() {
+    cargo_bin_cmd!("rustar-aligner")
+        .args(["--runMode", "soloCellFiltering"])
+        .assert()
+        .failure();
+}
