@@ -1,8 +1,13 @@
-# STAR 2.7.11b user-facing parameter names (the public CLI surface, not implementation).
-# Derived from the column-1 names of STAR 2.7.11b's parametersDefault, minus the three
-# non-user meta-params parametersFiles, sysShell, versionGenome. This is a NAME list only
-# (the public interface), never STAR source; it locks the CLI parameter-surface parity via
-# tests/parameter_surface.rs. 200 names.
+# STAR 2.7.11b user-facing parameter names: the public CLI surface, not implementation.
+# Every column-1 name of STAR 2.7.11b's parametersDefault, with none removed. This is a
+# NAME list only (the public interface), never STAR source; it locks CLI parameter-surface
+# parity via tests/parameter_surface.rs.
+#
+# An earlier revision dropped parametersFiles, sysShell and versionGenome as
+# "non-user meta-params". They are settable on STAR's command line like any other, so
+# leaving them out inflated the coverage figure by hiding three names rustar-aligner does
+# not accept. They are back, and listed in NOT_YET_ACCEPTED where they belong.
+# 203 names.
 alignEndsProtrude
 alignEndsType
 alignInsertionFlush
@@ -118,6 +123,7 @@ outWigNorm
 outWigReferencesPrefix
 outWigStrand
 outWigType
+parametersFiles
 peOverlapMMp
 peOverlapNbasesMin
 quantMode
@@ -193,9 +199,11 @@ soloUMIfiltering
 soloUMIlen
 soloUMIposition
 soloUMIstart
+sysShell
 twopass1readsN
 twopassMode
 varVCFfile
+versionGenome
 waspOutputMode
 winAnchorDistNbins
 winAnchorMultimapNmax

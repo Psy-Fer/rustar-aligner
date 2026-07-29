@@ -1,7 +1,7 @@
 //! Locks the CLI parameter surface against STAR 2.7.11b.
 //!
-//! `tests/data/star_2.7.11b_params.txt` lists every user-facing parameter name
-//! STAR 2.7.11b accepts. This test asserts that clap recognises each one, so
+//! `tests/data/star_2.7.11b_params.txt` lists every column-1 name of STAR
+//! 2.7.11b's `parametersDefault`, with none removed. This test asserts that clap recognises each one, so
 //! the coverage figure is a machine-checked number rather than a claim, and so
 //! surface drift shows up the moment it happens rather than in a bug report.
 //!
@@ -86,6 +86,13 @@ const ACCEPTED_BUT_INERT: &[(&str, &str)] = &[
 /// Adding a name here must always be a deliberate act. Removing one is what
 /// progress looks like.
 const NOT_YET_ACCEPTED: &[&str] = &[
+    // STAR meta-parameters, none of them accepted here. clap rejects them, so
+    // a user who passes one is told rather than quietly ignored, which is the
+    // behaviour these three need most: silently dropping `--parametersFiles`
+    // would discard every parameter in that file.
+    "parametersFiles",
+    "sysShell",
+    "versionGenome",
     // Aligner core (annotated-junction stitching, alignEndsType, in-recursion
     // length penalty).
     "alignEndsProtrude",
