@@ -136,3 +136,9 @@ Sections commonly used: Features, Bug fixes, Other changes.
   needs random access to the SA in RAM.
 
 Initial release of Rust rewrite of STAR.
+### Other changes
+
+- Removed `Transcript::read_seq`, a public field that was filled with a
+  copy of the read at every finalised alignment and never read. **API
+  removal.** Output is unchanged.
+
