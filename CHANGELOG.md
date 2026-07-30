@@ -186,10 +186,16 @@ Sections commonly used: Features, Bug fixes, Other changes.
   `GenomeIndex::write` flow remains for tests and any caller that
   needs random access to the SA in RAM.
 
-Initial release of Rust rewrite of STAR.
-### Other changes
-
 - Removed `Transcript::read_seq`, a public field that was filled with a
   copy of the read at every finalised alignment and never read. **API
   removal.** Output is unchanged.
 
+- The splice-motif check in the junction scan carries a sliding window
+  and looks the motif up in a table, instead of re-reading four genome
+  bases and matching on them at every position. Consecutive junction
+  positions share two of the four bases, so the scan does two genome
+  reads per position rather than four. Output is unchanged (SAM
+  byte-identical on 200k reads); about 2.8% off the wall clock on a
+  2M-read run, measured with `test/bench_ab.sh`.
+
+Initial release of Rust rewrite of STAR.
