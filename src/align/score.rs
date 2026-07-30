@@ -619,18 +619,43 @@ impl MotifWindow {
     }
 
     /// Base encoding: A=0, C=1, G=2, T=3.
+    ///
+    /// A table lookup rather than a match on the four bases. The match compiled
+    /// to a chain of compares whose outcome is data-dependent and close to
+    /// unpredictable, which the scan pays at every junction position; the table
+    /// is one load at a computed index. `|` binds tighter than `>=` in Rust, so
+    /// the guard tests the union of the four bases and rejects anything that is
+    /// not `A`, `C`, `G` or `T` — `N`, the chromosome-boundary byte, and the
+    /// out-of-range sentinel all take that path, exactly as no match arm
+    /// covered them.
     #[inline]
     fn motif(&self) -> SpliceMotif {
-        match (self.d1, self.d2, self.a1, self.a2) {
-            (2, 3, 0, 2) => SpliceMotif::GtAg,
-            (2, 1, 0, 2) => SpliceMotif::GcAg,
-            (0, 3, 0, 1) => SpliceMotif::AtAc,
-            (1, 3, 0, 1) => SpliceMotif::CtAc,
-            (1, 3, 2, 1) => SpliceMotif::CtGc,
-            (2, 3, 0, 3) => SpliceMotif::GtAt,
-            _ => SpliceMotif::NonCanonical,
+        let (d1, d2, a1, a2) = (self.d1, self.d2, self.a1, self.a2);
+        if d1 | d2 | a1 | a2 >= 4 {
+            return SpliceMotif::NonCanonical;
         }
+        MOTIF_TABLE[motif_index(d1, d2, a1, a2)]
     }
+}
+
+/// Every four-base combination, packed `d1 d2 a1 a2` at two bits each.
+static MOTIF_TABLE: [SpliceMotif; 256] = build_motif_table();
+
+/// Pack the four bases into the table index, two bits each.
+const fn motif_index(d1: u8, d2: u8, a1: u8, a2: u8) -> usize {
+    ((d1 << 6) | (d2 << 4) | (a1 << 2) | a2) as usize
+}
+
+const fn build_motif_table() -> [SpliceMotif; 256] {
+    // A=0, C=1, G=2, T=3.
+    let mut t = [SpliceMotif::NonCanonical; 256];
+    t[motif_index(2, 3, 0, 2)] = SpliceMotif::GtAg;
+    t[motif_index(2, 1, 0, 2)] = SpliceMotif::GcAg;
+    t[motif_index(0, 3, 0, 1)] = SpliceMotif::AtAc;
+    t[motif_index(1, 3, 0, 1)] = SpliceMotif::CtAc;
+    t[motif_index(1, 3, 2, 1)] = SpliceMotif::CtGc;
+    t[motif_index(2, 3, 0, 3)] = SpliceMotif::GtAt;
+    t
 }
 
 /// Splice junction motif types
@@ -704,6 +729,47 @@ mod tests {
     use crate::params::Parameters;
 
     use super::*;
+
+    /// The table has to agree with the match it replaced on every input the
+    /// scan can present, not merely on the six motifs. That includes `N` (4),
+    /// the chromosome-boundary byte (5) and the out-of-range sentinel, all of
+    /// which no match arm covered and which must therefore be `NonCanonical`.
+    #[test]
+    fn the_motif_table_agrees_with_the_original_match_on_every_input() {
+        fn original(d1: u8, d2: u8, a1: u8, a2: u8) -> SpliceMotif {
+            match (d1, d2, a1, a2) {
+                (2, 3, 0, 2) => SpliceMotif::GtAg,
+                (2, 1, 0, 2) => SpliceMotif::GcAg,
+                (0, 3, 0, 1) => SpliceMotif::AtAc,
+                (1, 3, 0, 1) => SpliceMotif::CtAc,
+                (1, 3, 2, 1) => SpliceMotif::CtGc,
+                (2, 3, 0, 3) => SpliceMotif::GtAt,
+                _ => SpliceMotif::NonCanonical,
+            }
+        }
+
+        let values = [0u8, 1, 2, 3, 4, 5, OUT_OF_RANGE];
+        for &d1 in &values {
+            for &d2 in &values {
+                for &a1 in &values {
+                    for &a2 in &values {
+                        let w = MotifWindow {
+                            donor: 0,
+                            d1,
+                            d2,
+                            a1,
+                            a2,
+                        };
+                        assert_eq!(
+                            w.motif(),
+                            original(d1, d2, a1, a2),
+                            "disagreement at ({d1}, {d2}, {a1}, {a2})"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn make_test_genome(seq: &[u8]) -> Genome {
         // Create simple genome with one chromosome
