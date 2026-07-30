@@ -149,6 +149,11 @@ Sections commonly used: Features, Bug fixes, Other changes.
   Since one read per gene is the ordinary shape of a multi-gene UMI, the
   flag removed nothing in practice. On a 20k-read 10x fixture the count
   matrix moves from 16 465 to 15 414 against STAR's 15 423.
+- `--soloUMIfiltering MultiGeneUMI_All` was aliased to `MultiGeneUMI`,
+  which is neither STAR's behaviour nor the documented one: in STAR
+  2.7.11b the variant is a no-op. It now removes a UMI seen in two or
+  more genes from **all** of them, the behaviour the option name
+  describes. Recorded in `DIVERGENCE.md` (closes #144).
 
 - **STARsolo `Gene` assignment now requires exon concordance**, matching
   STARsolo: a read counts toward a gene only when every aligned block
