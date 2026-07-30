@@ -99,6 +99,11 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Bug fixes
 
+- `--runThreadN 1` ran on every logical core instead of on one. The
+  rayon pool was configured only above 1, and skipping it leaves rayon's
+  default of one worker per core. Output is unchanged; the run now uses
+  the thread count asked for.
+
 - **STARsolo `Gene` assignment now requires exon concordance**, matching
   STARsolo: a read counts toward a gene only when every aligned block
   lies within the gene's exons, rather than merely overlapping one. This
