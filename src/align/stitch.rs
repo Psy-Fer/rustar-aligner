@@ -2155,7 +2155,6 @@ pub(crate) fn finalize_transcript(
         n_junction: wt.n_junction,
         junction_motifs: wt.junction_motifs.clone(),
         junction_annotated: wt.junction_annotated.clone(),
-        read_seq: read_seq.to_vec(),
     })
 }
 
@@ -2695,7 +2694,6 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
             // Restore original reverse-strand flag and read sequence for SAM output.
             if stitch_is_reverse {
                 transcript.is_reverse = true;
-                transcript.read_seq = read_seq.to_vec();
             }
             transcripts.push(transcript);
         }
