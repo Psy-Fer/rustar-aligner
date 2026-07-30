@@ -353,6 +353,18 @@ impl AlignmentScorer {
         let mut best_motif = SpliceMotif::NonCanonical;
         let mut best_motif_score = self.score_gap_noncan;
 
+        // `del` does not change across the scan, so whether the motif branch
+        // runs is decided once rather than per iteration.
+        let motif_in_range =
+            del >= self.align_intron_min as i64 && del <= self.align_intron_max as i64;
+
+        // The four motif bases sit at `donor`, `donor+1`, `donor+del-2` and
+        // `donor+del-1`, and `donor` moves exactly one base per iteration, so
+        // consecutive iterations share two of the four. Carrying the window
+        // instead of re-fetching it turns four genome reads per position into
+        // two. `window` is `None` until the first motif iteration primes it.
+        let mut window: Option<MotifWindow> = None;
+
         loop {
             let ri = r_a_end_inc as i64 + jr1 as i64;
             if ri >= 0 && (ri as usize) < read_seq.len() {
@@ -378,7 +390,7 @@ impl AlignmentScorer {
             }
 
             // Check splice motif at this junction position
-            if del >= self.align_intron_min as i64 && del <= self.align_intron_max as i64 {
+            if motif_in_range {
                 // Donor position in SA space: one past the last donor-exon base
                 let donor_sa = (g_a_end_inc as i64 + jr1 as i64 + 1) as u64;
                 // Convert to forward genome coordinates for motif detection
@@ -387,7 +399,14 @@ impl AlignmentScorer {
                 } else {
                     donor_sa
                 };
-                let motif = self.detect_splice_motif(donor_fwd, del as u32, genome);
+                let w = match window.as_mut() {
+                    Some(w) => {
+                        w.slide_to(donor_fwd, del as u64, genome);
+                        &*w
+                    }
+                    None => window.insert(MotifWindow::at(donor_fwd, del as u64, genome)),
+                };
+                let motif = w.motif();
                 let motif_score = self.score_splice_junction(motif);
                 let score2 = score1 + motif_score;
 
@@ -535,20 +554,82 @@ impl AlignmentScorer {
 /// `donor_pos` is the 0-based position of the intron's first base on the
 /// forward strand; `intron_len` is the intron length in bases.
 pub fn detect_splice_motif(donor_pos: u64, intron_len: u32, genome: &Genome) -> SpliceMotif {
-    let d1 = genome.get_base(donor_pos);
-    let d2 = genome.get_base(donor_pos + 1);
-    let a1 = genome.get_base(donor_pos + intron_len as u64 - 2);
-    let a2 = genome.get_base(donor_pos + intron_len as u64 - 1);
+    MotifWindow::at(donor_pos, intron_len as u64, genome).motif()
+}
 
-    // Base encoding: A=0, C=1, G=2, T=3.
-    match (d1, d2, a1, a2) {
-        (Some(2), Some(3), Some(0), Some(2)) => SpliceMotif::GtAg,
-        (Some(2), Some(1), Some(0), Some(2)) => SpliceMotif::GcAg,
-        (Some(0), Some(3), Some(0), Some(1)) => SpliceMotif::AtAc,
-        (Some(1), Some(3), Some(0), Some(1)) => SpliceMotif::CtAc,
-        (Some(1), Some(3), Some(2), Some(1)) => SpliceMotif::CtGc,
-        (Some(2), Some(3), Some(0), Some(3)) => SpliceMotif::GtAt,
-        _ => SpliceMotif::NonCanonical,
+/// A position off the end of the genome. No motif arm matches it, so it falls
+/// through to `NonCanonical` exactly as `get_base` returning `None` did.
+const OUT_OF_RANGE: u8 = u8::MAX;
+
+#[inline]
+fn base_or_out_of_range(genome: &Genome, pos: u64) -> u8 {
+    genome.get_base(pos).unwrap_or(OUT_OF_RANGE)
+}
+
+/// The four bases that decide a splice motif: the intron's first two and last
+/// two, on the forward strand.
+///
+/// Kept as a struct so the junction scan can slide it. Successive junction
+/// positions differ by one base, so three of the four positions overlap the
+/// previous window and only two bases have to be read from the genome.
+#[derive(Clone, Copy)]
+struct MotifWindow {
+    donor: u64,
+    d1: u8,
+    d2: u8,
+    a1: u8,
+    a2: u8,
+}
+
+impl MotifWindow {
+    #[inline]
+    fn at(donor: u64, intron_len: u64, genome: &Genome) -> Self {
+        Self {
+            donor,
+            d1: base_or_out_of_range(genome, donor),
+            d2: base_or_out_of_range(genome, donor + 1),
+            a1: base_or_out_of_range(genome, donor + intron_len - 2),
+            a2: base_or_out_of_range(genome, donor + intron_len - 1),
+        }
+    }
+
+    /// Move the window to `donor`, reusing what overlaps.
+    ///
+    /// A step of exactly one base either way shares two of the four: moving
+    /// right, the old `d2`/`a2` become the new `d1`/`a1`; moving left, the old
+    /// `d1`/`a1` become the new `d2`/`a2`. Any other step is rare enough that
+    /// re-reading all four is the simpler answer.
+    #[inline]
+    fn slide_to(&mut self, donor: u64, intron_len: u64, genome: &Genome) {
+        if donor == self.donor + 1 {
+            self.d1 = self.d2;
+            self.a1 = self.a2;
+            self.d2 = base_or_out_of_range(genome, donor + 1);
+            self.a2 = base_or_out_of_range(genome, donor + intron_len - 1);
+            self.donor = donor;
+        } else if donor + 1 == self.donor {
+            self.d2 = self.d1;
+            self.a2 = self.a1;
+            self.d1 = base_or_out_of_range(genome, donor);
+            self.a1 = base_or_out_of_range(genome, donor + intron_len - 2);
+            self.donor = donor;
+        } else if donor != self.donor {
+            *self = Self::at(donor, intron_len, genome);
+        }
+    }
+
+    /// Base encoding: A=0, C=1, G=2, T=3.
+    #[inline]
+    fn motif(&self) -> SpliceMotif {
+        match (self.d1, self.d2, self.a1, self.a2) {
+            (2, 3, 0, 2) => SpliceMotif::GtAg,
+            (2, 1, 0, 2) => SpliceMotif::GcAg,
+            (0, 3, 0, 1) => SpliceMotif::AtAc,
+            (1, 3, 0, 1) => SpliceMotif::CtAc,
+            (1, 3, 2, 1) => SpliceMotif::CtGc,
+            (2, 3, 0, 3) => SpliceMotif::GtAt,
+            _ => SpliceMotif::NonCanonical,
+        }
     }
 }
 
