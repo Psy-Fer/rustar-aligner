@@ -68,11 +68,13 @@ pub fn run(params: &Parameters) -> anyhow::Result<()> {
     // RSS for nothing. `build_global` errors if called twice; we
     // ignore the error so the in-process tests that already
     // initialised the pool still work.
-    if usize::from(params.run_thread_n) > 1 {
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(params.run_thread_n.into())
-            .build_global();
-    }
+    //
+    // Configured at every value, `1` included. Skipping the build at 1 does not
+    // yield one thread: it leaves rayon's default of one worker per logical
+    // core, so `--runThreadN 1` ran on the whole machine.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(params.run_thread_n.into())
+        .build_global();
 
     match params.run_mode {
         RunMode::GenomeGenerate => genome_generate(params),
