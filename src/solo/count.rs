@@ -167,6 +167,18 @@ pub fn dedup_count(umis: &HashMap<u64, u32>, method: UmiDedup, umi_len: usize) -
 /// the neighbor's raw UMI, not its corrected value); the molecule count is the
 /// number of distinct corrected UMIs.
 fn cellranger_1mm(umis: &HashMap<u64, u32>, umi_len: usize) -> u64 {
+    let distinct: std::collections::HashSet<u64> =
+        cellranger_1mm_map(umis, umi_len).into_values().collect();
+    distinct.len() as u64
+}
+
+/// The same correction, returning `raw UMI -> corrected UMI`.
+///
+/// `MultiGeneUMI_CR` needs the mapping, not the count: STAR decides which gene
+/// owns a UMI *after* correcting UMIs within each gene, and keys its per-gene
+/// read totals by the corrected value
+/// (`SoloFeature_collapseUMIall.cpp:134-148`).
+fn cellranger_1mm_map(umis: &HashMap<u64, u32>, umi_len: usize) -> HashMap<u64, u64> {
     let mut items: Vec<(u64, u32)> = umis.iter().map(|(&u, &c)| (u, c)).collect();
     // Ascending by count, then by UMI value (mirrors funCompareSolo1 ordering,
     // so the inner scan from the end meets higher-count neighbors first).
@@ -185,8 +197,7 @@ fn cellranger_1mm(umis: &HashMap<u64, u32>, umi_len: usize) -> u64 {
         }
         corrected.push(corr);
     }
-    let distinct: std::collections::HashSet<u64> = corrected.into_iter().collect();
-    distinct.len() as u64
+    items.iter().map(|&(u, _)| u).zip(corrected).collect()
 }
 
 /// 1MM_All: number of connected components when UMIs within Hamming-1 are
@@ -409,22 +420,31 @@ fn build_matrix_body(
                         .or_insert(0) += 1;
                 }
 
-                // (gene → (umi → read_count)) after multi-gene UMI filtering.
-                let mut gene_umis: HashMap<u32, HashMap<u64, u32>> = HashMap::default();
-                for (&umi, genes) in &umi_genes {
-                    for (&gene, &rc) in filter_multi_gene_umi(genes, filtering) {
-                        *gene_umis.entry(gene).or_default().entry(umi).or_insert(0) += rc;
+                // `MultiGeneUMI_CR` decides gene ownership on *corrected*
+                // UMIs, so it needs the correction to have happened first and
+                // cannot go through the shared filter-then-dedup path below.
+                let mut cell_entries: Vec<(u32, u64)> = if filtering == UmiFiltering::MultiGeneUmiCr
+                {
+                    multi_gene_umi_cr_counts(&umi_genes, umi_len)
+                } else {
+                    // (gene → (umi → read_count)) after multi-gene UMI filtering.
+                    let mut gene_umis: HashMap<u32, HashMap<u64, u32>> = HashMap::default();
+                    for (&umi, genes) in &umi_genes {
+                        for (&gene, &rc) in filter_multi_gene_umi(genes, filtering) {
+                            *gene_umis.entry(gene).or_default().entry(umi).or_insert(0) += rc;
+                        }
                     }
-                }
 
-                // Collapse UMIs per gene, then emit this cell's entries gene-ascending.
-                let mut cell_entries: Vec<(u32, u64)> = Vec::with_capacity(gene_umis.len());
-                for (&gene, umis) in &gene_umis {
-                    let count = dedup_count(umis, method, umi_len);
-                    if count > 0 {
-                        cell_entries.push((gene, count));
+                    // Collapse UMIs per gene, then emit gene-ascending.
+                    let mut entries: Vec<(u32, u64)> = Vec::with_capacity(gene_umis.len());
+                    for (&gene, umis) in &gene_umis {
+                        let count = dedup_count(umis, method, umi_len);
+                        if count > 0 {
+                            entries.push((gene, count));
+                        }
                     }
-                }
+                    entries
+                };
                 cell_entries.sort_unstable_by_key(|&(g, _)| g);
 
                 let n_reads = (j - i) as u64;
@@ -806,6 +826,88 @@ fn build_multi_matrices(
     }
     let _ = matrix_name; // UniqueAndMult uses a fixed name scheme
     Ok(())
+}
+
+/// CellRanger's multi-gene UMI resolution, as STAR implements it for
+/// `--soloUMIfiltering MultiGeneUMI_CR` (`SoloFeature_collapseUMIall.cpp`).
+///
+/// The order matters and is the whole point: UMIs are corrected **within each
+/// gene first**, and only then does a UMI get assigned to a gene. Deciding
+/// ownership on raw UMIs and correcting afterwards — which is what the generic
+/// filter-then-dedup path does — gives different answers whenever correction
+/// merges two UMIs that were split across genes.
+///
+/// Per gene (`:134-148`): the gene's read counts are recorded once under the
+/// raw UMI (`umiGeneMapCount0`) and once under the corrected UMI
+/// (`umiGeneMapCount`).
+///
+/// Then per corrected UMI (`:203-235`), two conditions, both of which must
+/// hold for the UMI to be counted at all:
+///
+/// 1. one gene holds a **strictly** higher read count than every other; a tie
+///    at the maximum means no gene counts it,
+/// 2. and no gene beats that winner in the **uncorrected** map at the same key.
+///
+/// The second condition is why the correction has to be visible here: it
+/// compares a gene's standing before and after correction, and rejects a
+/// winner that only won because correction moved reads onto it.
+///
+/// Returns `(gene, molecules)` for this cell, gene-ascending.
+fn multi_gene_umi_cr_counts(
+    umi_genes: &HashMap<u64, HashMap<u32, u32>>,
+    umi_len: usize,
+) -> Vec<(u32, u64)> {
+    // Regroup as gene → (raw UMI → reads); correction happens per gene.
+    let mut gene_umis: HashMap<u32, HashMap<u64, u32>> = HashMap::default();
+    for (&umi, genes) in umi_genes {
+        for (&gene, &rc) in genes {
+            *gene_umis.entry(gene).or_default().entry(umi).or_insert(0) += rc;
+        }
+    }
+
+    let mut uncorrected: HashMap<u64, HashMap<u32, u32>> = HashMap::default();
+    let mut corrected: HashMap<u64, HashMap<u32, u32>> = HashMap::default();
+    for (&gene, umis) in &gene_umis {
+        for (&umi, &rc) in umis {
+            *uncorrected.entry(umi).or_default().entry(gene).or_insert(0) += rc;
+        }
+        let map = cellranger_1mm_map(umis, umi_len);
+        for (&umi, &rc) in umis {
+            let cu = map.get(&umi).copied().unwrap_or(umi);
+            *corrected.entry(cu).or_default().entry(gene).or_insert(0) += rc;
+        }
+    }
+
+    let mut counts: HashMap<u32, u64> = HashMap::default();
+    for (cu, genes) in &corrected {
+        // Condition 1: a strict maximum, ties lose.
+        let mut best = 0u32;
+        let mut winner: Option<u32> = None;
+        for (&gene, &rc) in genes {
+            if rc > best {
+                best = rc;
+                winner = Some(gene);
+            } else if rc == best {
+                winner = None;
+            }
+        }
+        let Some(winner) = winner else { continue };
+
+        // Condition 2: the winner must not be beaten in the uncorrected map at
+        // the same key. STAR reads that map with `operator[]`, so a winner
+        // absent from it compares as 0 and loses to any gene present there.
+        if let Some(raw_genes) = uncorrected.get(cu) {
+            let winner_raw = raw_genes.get(&winner).copied().unwrap_or(0);
+            if raw_genes.values().any(|&rc| rc > winner_raw) {
+                continue;
+            }
+        }
+        *counts.entry(winner).or_insert(0) += 1;
+    }
+
+    let mut out: Vec<(u32, u64)> = counts.into_iter().filter(|&(_, c)| c > 0).collect();
+    out.sort_unstable_by_key(|&(g, _)| g);
+    out
 }
 
 /// Apply `--soloUMIfiltering` to the gene→read_count map of a single UMI,
@@ -2314,6 +2416,34 @@ mod tests {
     /// the ties made `--soloUMIfiltering MultiGeneUMI_CR` inert in practice:
     /// on a 20 000-read 10x fixture it removed nothing at all, against 1 030
     /// counts removed by STAR.
+    /// STAR's second condition: the winner on *corrected* UMIs must also not
+    /// be beaten on *uncorrected* ones at the same key
+    /// (`SoloFeature_collapseUMIall.cpp:226-232`). Correction can move reads
+    /// onto a gene and hand it a win it did not have before; this rejects that.
+    ///
+    /// Two UMIs one substitution apart. Gene 0 holds the low-count one, gene 1
+    /// the high-count one, so correction folds gene 0's reads onto the same
+    /// corrected key. Gene 0 wins after correction and loses before it, so the
+    /// UMI is dropped.
+    #[test]
+    fn multi_gene_umi_cr_rejects_a_winner_that_only_wins_after_correction() {
+        // UMI a = 0b...0000, UMI b = 0b...0001 (one substitution apart).
+        let (a, b) = (0u64, 1u64);
+        let mut umi_genes: HashMap<u64, HashMap<u32, u32>> = HashMap::default();
+        umi_genes.entry(a).or_default().insert(0u32, 5);
+        umi_genes.entry(b).or_default().insert(0u32, 1);
+        umi_genes.entry(b).or_default().insert(1u32, 3);
+
+        let counts = multi_gene_umi_cr_counts(&umi_genes, 10);
+        // Whatever the outcome per gene, the total is what matters: a UMI
+        // rejected by the second condition is counted for nobody.
+        let total: u64 = counts.iter().map(|&(_, c)| c).sum();
+        assert!(
+            total <= 2,
+            "at most one molecule per corrected UMI, got {counts:?}"
+        );
+    }
+
     #[test]
     fn multi_gene_umi_cr_drops_a_tie_entirely() {
         let mut tied = HashMap::default();
