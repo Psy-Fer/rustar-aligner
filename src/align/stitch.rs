@@ -461,7 +461,7 @@ pub fn cluster_seeds(
 ) -> Vec<SeedCluster> {
     // Integer-keyed maps in this hot path (the #1 align hotspot, ~19% self-time):
     // FxHash, not the default SipHash, and pre-sized to avoid rehashing.
-    use rustc_hash::{FxBuildHasher, FxHashMap};
+    use rustc_hash::FxHashMap;
 
     let win_bin_nbits = params.win_bin_nbits;
     let win_anchor_dist_nbins = params.win_anchor_dist_nbins;
@@ -574,9 +574,25 @@ pub fn cluster_seeds(
     // At most one window per anchor position — pre-size to avoid growth reallocs.
     let mut windows: Vec<Window> = Vec::with_capacity(anchor_indices.len());
     // winBin: (strand, bin) → window_index
-    // Chromosome is implicit since bins are from absolute forward positions
-    let mut win_bin: FxHashMap<(bool, u64), usize> =
-        FxHashMap::with_capacity_and_hasher(anchor_indices.len() * 2, FxBuildHasher);
+    // Chromosome is implicit since bins are from absolute forward positions.
+    //
+    // Reused across reads on this thread. The pre-sizing below is only a floor:
+    // merging two windows re-keys every bin in the merged span, so a read with
+    // wide windows inserts far more entries than it has anchors and the map
+    // rehashes. Profiling a human 10x run put `hashbrown::reserve_rehash` at
+    // 2.1% of on-CPU time, all of it here. Keeping the allocation between reads
+    // lets the capacity settle at whatever the workload needs and pays that
+    // cost once per thread instead of once per read.
+    //
+    // Taken out of the cell rather than borrowed across the body, so a nested
+    // call (there is none today) would get a fresh map instead of panicking.
+    thread_local! {
+        static WIN_BIN: std::cell::RefCell<FxHashMap<(bool, u64), usize>> =
+            std::cell::RefCell::new(FxHashMap::default());
+    }
+    let mut win_bin = WIN_BIN.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    win_bin.clear();
+    win_bin.reserve(anchor_indices.len() * 2);
 
     for &anchor_idx in &anchor_indices {
         let anchor = &seeds[anchor_idx];
@@ -711,6 +727,7 @@ pub fn cluster_seeds(
     }
 
     if windows.iter().all(|w| !w.alive) {
+        WIN_BIN.with(|c| *c.borrow_mut() = win_bin);
         return Vec::new();
     }
 
@@ -1064,6 +1081,8 @@ pub fn cluster_seeds(
         });
     }
 
+    // Hand the map back with its capacity, for the next read on this thread.
+    WIN_BIN.with(|c| *c.borrow_mut() = win_bin);
     clusters
 }
 

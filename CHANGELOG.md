@@ -11,6 +11,14 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ## [Unreleased]
 
+### Other changes
+
+- `cluster_seeds` reuses its window-bin map across reads on a thread instead
+  of rebuilding it per read. Merging two windows re-keys every bin in the
+  merged span, so the per-read pre-sizing was only a floor and the map
+  rehashed; profiling a human 10x run put that rehash at 2.1% of on-CPU time.
+  Output-neutral, verified by an empty diff on 20 M read pairs.
+
 ### Features
 
 - **STARsolo single-cell quantification (`--soloType`)** — the 10x
