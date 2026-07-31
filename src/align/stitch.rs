@@ -1065,13 +1065,17 @@ pub fn cluster_seeds(
 
     // Phase 5: Build SeedCluster output
     let mut clusters = Vec::with_capacity(windows.len());
-    for window in &windows {
+    // `windows` is dropped at the end of this function, so each window's
+    // alignments move into its cluster rather than being cloned. The clone was
+    // a full Vec<WindowAlignment> copy per window per read, thrown away one
+    // statement later.
+    for window in &mut windows {
         if !window.alive || window.alignments.is_empty() {
             continue;
         }
 
         clusters.push(SeedCluster {
-            alignments: window.alignments.clone(),
+            alignments: std::mem::take(&mut window.alignments),
             chr_idx: window.chr_idx,
             genome_start: window.actual_start,
             genome_end: window.actual_end,
