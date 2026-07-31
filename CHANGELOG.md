@@ -121,6 +121,11 @@ Sections commonly used: Features, Bug fixes, Other changes.
   rayon pool was configured only above 1, and skipping it leaves rayon's
   default of one worker per core. Output is unchanged; the run now uses
   the thread count asked for.
+- `--soloUMIfiltering MultiGeneUMI_CR` kept every gene tied at the
+  highest read count; CellRanger gives a tied UMI to no gene at all.
+  Since one read per gene is the ordinary shape of a multi-gene UMI, the
+  flag removed nothing in practice. On a 20k-read 10x fixture the count
+  matrix moves from 16 465 to 15 414 against STAR's 15 423.
 
 - **STARsolo `Gene` assignment now requires exon concordance**, matching
   STARsolo: a read counts toward a gene only when every aligned block
