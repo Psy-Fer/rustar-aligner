@@ -114,7 +114,6 @@ impl PairedAlignment {
             n_junction: m1.n_junction + m2.n_junction,
             junction_motifs: Vec::new(),
             junction_annotated: Vec::new(),
-            read_seq: Vec::new(),
         }
     }
 }
@@ -889,8 +888,6 @@ pub fn align_paired_read(
                     t1.is_reverse = false;
                     t2.is_reverse = true;
                 }
-                t1.read_seq = mate1_seq.to_vec();
-                t2.read_seq = mate2_seq.to_vec();
 
                 if params.chim_segment_min > 0 {
                     all_m1_transcripts.push(t1.clone());
@@ -934,7 +931,6 @@ pub fn align_paired_read(
                         0, // mate1
                     ) {
                         t.is_reverse = stitch_is_reverse;
-                        t.read_seq = mate1_seq.to_vec();
                         if params.chim_segment_min > 0 {
                             all_m1_transcripts.push(t.clone());
                         }
@@ -958,7 +954,6 @@ pub fn align_paired_read(
                         1, // mate2
                     ) {
                         t.is_reverse = !stitch_is_reverse;
-                        t.read_seq = mate2_seq.to_vec();
                         if params.chim_segment_min > 0 {
                             all_m2_transcripts.push(t.clone());
                         }
@@ -1641,7 +1636,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         };
         let pair = PairedAlignment {
             mate1_transcript: make_tr(1000, 1100, 0, 100),
@@ -1803,7 +1797,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         let t2 = Transcript {
@@ -1825,7 +1818,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         // Distance = 300bp, within default limit (auto mode = unlimited)
@@ -1859,7 +1851,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         let t2 = Transcript {
@@ -1881,7 +1872,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         // Distance = 400bp, exceeds limit of 100bp
@@ -1913,7 +1903,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         let t2 = Transcript {
@@ -1935,7 +1924,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         let tlen = calculate_insert_size(&t1, &t2);
@@ -1968,7 +1956,6 @@ mod tests {
             n_junction: 2,
             junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::CtAc], // +strand and -strand
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         // Create a transcript with consistent strand motifs (all + strand)
@@ -1991,7 +1978,6 @@ mod tests {
             n_junction: 2,
             junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::GcAg], // both + strand
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         // Note: STAR's RemoveInconsistentStrands filters transcripts where
@@ -2070,7 +2056,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         let t2 = Transcript {
@@ -2092,7 +2077,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         let tlen = calculate_insert_size(&t1, &t2);
@@ -2133,7 +2117,6 @@ mod tests {
             n_junction: 1,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         // Case 1: NonCanonical + unannotated → should be filtered
@@ -2219,7 +2202,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
         };
 
         // Test BothMapped variant

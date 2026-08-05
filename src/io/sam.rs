@@ -1828,7 +1828,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         writer
@@ -1971,7 +1970,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3]; // ACGT
@@ -2027,7 +2025,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![0, 1, 2, 3],
             },
             Transcript {
                 chr_idx: 0,
@@ -2042,7 +2039,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![0, 1, 2, 3],
             },
         ];
 
@@ -2091,7 +2087,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         }];
 
         let records = SamWriter::build_transcriptome_records(
@@ -2182,7 +2177,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let mate2_transcript = Transcript {
@@ -2204,7 +2198,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2],
         };
 
         let mate_seq = vec![0, 1, 2, 3];
@@ -2300,7 +2293,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 4],
         };
 
         // Mate2 at position 4 (chr_start=0, so per-chr pos = 5)
@@ -2323,7 +2315,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 3],
         };
 
         let mate_seq = vec![0; 4];
@@ -2400,7 +2391,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         };
 
         let t2 = Transcript {
@@ -2422,7 +2412,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         };
 
         let mut rec1 = RecordBuf::default();
@@ -2480,7 +2469,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         };
 
         let t2 = Transcript {
@@ -2502,7 +2490,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         };
 
         let mut rec1 = RecordBuf::default();
@@ -2540,7 +2527,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -2659,7 +2645,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -2713,7 +2698,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![0; 4],
             },
             Transcript {
                 chr_idx: 0,
@@ -2728,7 +2712,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![0; 4],
             },
             Transcript {
                 chr_idx: 0,
@@ -2743,7 +2726,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![0; 4],
             },
         ];
 
@@ -2802,7 +2784,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 4],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -2853,7 +2834,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 4],
         };
         // Two alignments tied for the best score (100), one strictly worse (98).
         let transcripts = vec![mk(0, 100), mk(2, 98), mk(4, 100)];
@@ -2912,7 +2892,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![0; 4],
             },
             Transcript {
                 chr_idx: 0,
@@ -2927,7 +2906,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![0; 4],
             },
         ];
 
@@ -2981,7 +2959,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 4],
         };
         let mate2 = Transcript {
             genome_start: 120,
@@ -3037,7 +3014,6 @@ mod tests {
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::GtAg],
             junction_annotated: vec![false],
-            read_seq: vec![0; 4],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -3083,7 +3059,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 4],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -3133,7 +3108,6 @@ mod tests {
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::CtAc],
             junction_annotated: vec![false],
-            read_seq: vec![0; 4],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -3185,7 +3159,6 @@ mod tests {
             n_junction: 2,
             junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::CtAc], // +strand and -strand
             junction_annotated: vec![false, false],
-            read_seq: vec![0; 4],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -3235,7 +3208,6 @@ mod tests {
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::GtAg],
             junction_annotated: vec![false],
-            read_seq: vec![0; 4],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -3289,7 +3261,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![0; 4],
             })
             .collect();
 
@@ -3362,7 +3333,6 @@ mod tests {
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::GtAg],
             junction_annotated: vec![false],
-            read_seq: vec![],
         };
 
         let jm = build_jm_tag(&transcript);
@@ -3391,7 +3361,6 @@ mod tests {
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::GtAg],
             junction_annotated: vec![true],
-            read_seq: vec![],
         };
 
         let jm = build_jm_tag(&transcript);
@@ -3416,7 +3385,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         };
 
         assert!(build_jm_tag(&transcript).is_none());
@@ -3444,7 +3412,6 @@ mod tests {
             n_junction: 2,
             junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::CtAc],
             junction_annotated: vec![true, false],
-            read_seq: vec![],
         };
 
         let jm = build_jm_tag(&transcript);
@@ -3473,7 +3440,6 @@ mod tests {
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::GtAg],
             junction_annotated: vec![false],
-            read_seq: vec![],
         };
 
         // chr_start=0, genome_start=100, intron starts at 125, ends at 324
@@ -3499,7 +3465,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         };
 
         assert!(build_ji_tag(&transcript, 0).is_none());
@@ -3523,7 +3488,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         // Read exactly matches genome[0..4] = ACGT
@@ -3550,7 +3514,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 0, 2, 0], // A,A,G,A vs genome A,C,G,T
         };
 
         // Position 1: read=A, ref=C → mismatch (C in MD)
@@ -3582,7 +3545,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 0, 1], // AC + AC (genome AC^GT AC)
         };
 
         // Read: A,C,[del G,T],A,C
@@ -3613,7 +3575,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 3, 3, 2, 3], // AC + TT(ins) + GT
         };
 
         // Insertions are invisible in MD — just match counts
@@ -3644,7 +3605,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 0, 2, 3, 0, 1, 0, 0], // XX + GTAC + XX
         };
 
         // Soft clips don't appear in MD
@@ -3672,7 +3632,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -3730,7 +3689,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         // Mate2: reverse, chr 0, pos 4
@@ -3753,7 +3711,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2],
         };
 
         let seq = vec![0, 1, 2, 3];
@@ -3839,7 +3796,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         // Mate2: score=80, 2 mismatches, 1 deletion
@@ -3866,7 +3822,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2],
         };
 
         let seq1 = vec![0, 1, 2, 3];
@@ -3968,7 +3923,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let mate2_trans = Transcript {
@@ -3990,7 +3944,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2],
         };
 
         let seq = vec![0, 1, 2, 3];
@@ -4063,7 +4016,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -4142,7 +4094,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -4218,7 +4169,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -4359,7 +4309,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -4414,7 +4363,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let read_seq = vec![0, 1, 2, 3];
@@ -4501,7 +4449,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let mate1_seq = vec![0, 1, 2, 3]; // ACGT
@@ -4574,7 +4521,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let mate1_seq = vec![0, 1, 2, 3];
@@ -4660,7 +4606,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
         };
 
         let mate1_seq = vec![0, 1, 2, 3];
@@ -4732,7 +4677,6 @@ mod tests {
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::GtAg],
             junction_annotated: vec![false],
-            read_seq: vec![0; 4],
         }
     }
 

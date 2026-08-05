@@ -1224,6 +1224,27 @@ pub fn write_gene_matrix(
             if gzip { " [gzip]" } else { "" },
         );
 
+        // `--soloCellReadStats CB`: the per-cell read summary, alongside the
+        // raw matrix because its UMI and gene columns are the raw totals.
+        if let Some(cell_stats) = &ctx.cell_read_stats {
+            let umi_gene: std::collections::BTreeMap<u32, (u32, u32)> = mstats
+                .cells
+                .iter()
+                .map(|c| (c.cb, (c.n_umis as u32, c.n_genes)))
+                .collect();
+            let path = feature_dir.join("CellReads.stats");
+            let text = cell_stats.lock().unwrap().render(
+                |cb| {
+                    ctx.whitelist
+                        .barcode_string(cb)
+                        .unwrap_or_else(|| cb.to_string())
+                },
+                &umi_gene,
+            );
+            std::fs::write(&path, text).map_err(|e| Error::io(e, &path))?;
+            log::info!("STARsolo: wrote {}/CellReads.stats", feature.dir_name());
+        }
+
         // Filtered (cell-called) matrix per --soloCellFilter. EmptyDrops_CR runs
         // the Monte-Carlo rescue (needs the per-cell profiles in the body).
         let called = if params
@@ -1879,6 +1900,197 @@ fn write_barcodes_subset(
         Ok(())
     })?;
     Ok(())
+}
+
+/// `--runMode soloCellFiltering <raw dir> <output prefix>`: cell-call an
+/// existing raw count matrix without aligning anything.
+///
+/// STAR `SoloFeature_loadRawMatrix.cpp` plus the same `--soloCellFilter` used
+/// at the end of a solo run. The point of the mode is that cell calling is a
+/// decision about a matrix, not about reads: re-calling with different
+/// parameters should not mean re-aligning, and a matrix produced elsewhere
+/// should be callable too.
+pub fn run_cell_filtering(params: &crate::params::Parameters) -> anyhow::Result<()> {
+    let raw_dir = Path::new(&params.run_mode_in[1]);
+    let out_prefix = &params.run_mode_in[2];
+
+    let find = |base: &str| -> Result<PathBuf, Error> {
+        for name in [base.to_string(), format!("{base}.gz")] {
+            let p = raw_dir.join(&name);
+            if p.exists() {
+                return Ok(p);
+            }
+        }
+        Err(Error::Parameter(format!(
+            "{}: no {base} (or {base}.gz) in the raw matrix directory",
+            raw_dir.display()
+        )))
+    };
+
+    let barcodes = read_first_column(&find("barcodes.tsv")?)?;
+    let features_path = find("features.tsv")?;
+    let matrix_path = find("matrix.mtx")?;
+
+    // Stream the matrix into the same temp-body form the align path produces,
+    // so the filters below are the identical code rather than a second
+    // implementation that can drift from it.
+    let mut body = tempfile::NamedTempFile::new().map_err(|e| Error::io(e, raw_dir))?;
+    let mut totals: HashMap<u32, (u64, u32)> = HashMap::default();
+    let mut n_features = 0usize;
+    {
+        let mut out = std::io::BufWriter::new(body.as_file_mut());
+        let reader = open_maybe_gz(&matrix_path)?;
+        let mut header_seen = false;
+        for line in reader.lines() {
+            let line = line.map_err(|e| Error::io(e, &matrix_path))?;
+            if line.starts_with('%') {
+                continue;
+            }
+            let mut fields = line.split_whitespace();
+            let (Some(first), Some(second), Some(third)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if !header_seen {
+                // `<features> <barcodes> <entries>`
+                n_features = first.parse().unwrap_or(0);
+                header_seen = true;
+                continue;
+            }
+            let (gene, cb, count) = (
+                first.parse::<u32>().unwrap_or(0),
+                second.parse::<u32>().unwrap_or(0),
+                third.parse::<f64>().unwrap_or(0.0),
+            );
+            if gene == 0 || cb == 0 {
+                continue;
+            }
+            // Counts can be real-valued in a multimapper matrix; the cell
+            // filters work on UMI totals, so round rather than refuse.
+            let count = count.round().max(0.0) as u64;
+            let e = totals.entry(cb - 1).or_insert((0, 0));
+            e.0 += count;
+            e.1 += 1;
+            writeln!(out, "{gene} {cb} {count}").map_err(|e| Error::io(e, raw_dir))?;
+        }
+        out.flush().map_err(|e| Error::io(e, raw_dir))?;
+    }
+    if n_features == 0 {
+        return Err(Error::Parameter(format!(
+            "{}: no MatrixMarket header, so the matrix shape is unknown",
+            matrix_path.display()
+        ))
+        .into());
+    }
+
+    let mut cells: Vec<CellStat> = totals
+        .iter()
+        .map(|(&cb, &(n_umis, n_genes))| CellStat {
+            cb,
+            n_reads: n_umis,
+            n_umis,
+            n_genes,
+        })
+        .collect();
+    cells.sort_unstable_by_key(|c| c.cb);
+    log::info!(
+        "soloCellFiltering: {} barcodes with counts, {n_features} features",
+        cells.len()
+    );
+
+    let called = if params
+        .solo_cell_filter
+        .first()
+        .is_some_and(|m| m == "EmptyDrops_CR")
+    {
+        Some(emptydrops_called(
+            &cells,
+            &body,
+            n_features,
+            &params.solo_cell_filter,
+        )?)
+    } else {
+        called_cells(&cells, &params.solo_cell_filter)
+    };
+    let Some(cbs) = called.filter(|c| !c.is_empty()) else {
+        log::warn!("soloCellFiltering: no cells called; writing nothing");
+        return Ok(());
+    };
+
+    let out_dir = Path::new(out_prefix);
+    let (dir, prefix): (&Path, &str) = if out_prefix.ends_with('/') {
+        (out_dir, "")
+    } else {
+        (
+            out_dir.parent().unwrap_or_else(|| Path::new(".")),
+            out_dir.file_name().and_then(|s| s.to_str()).unwrap_or(""),
+        )
+    };
+    std::fs::create_dir_all(dir).map_err(|e| Error::io(e, dir))?;
+
+    let remap: HashMap<u32, u32> = cbs
+        .iter()
+        .enumerate()
+        .map(|(i, &cb)| (cb, i as u32 + 1))
+        .collect();
+
+    let bc_path = dir.join(format!("{prefix}barcodes.tsv"));
+    let mut bc = String::new();
+    for &cb in &cbs {
+        let Some(name) = barcodes.get(cb as usize) else {
+            continue;
+        };
+        bc.push_str(name);
+        bc.push('\n');
+    }
+    std::fs::write(&bc_path, bc).map_err(|e| Error::io(e, &bc_path))?;
+
+    let feat_path = dir.join(format!("{prefix}features.tsv"));
+    std::fs::copy(&features_path, &feat_path).map_err(|e| Error::io(e, &feat_path))?;
+
+    let mtx_path = dir.join(format!("{prefix}matrix.mtx"));
+    let nnz = finalize_matrix(
+        &body,
+        &mtx_path,
+        false,
+        n_features,
+        cbs.len(),
+        0,
+        Some(&remap),
+    )?;
+    log::info!(
+        "soloCellFiltering: {} cells, {nnz} entries -> {}",
+        cbs.len(),
+        dir.display()
+    );
+    Ok(())
+}
+
+/// First whitespace-separated column of a (possibly gzipped) file.
+fn read_first_column(path: &Path) -> Result<Vec<String>, Error> {
+    let reader = open_maybe_gz(path)?;
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        let line = line.map_err(|e| Error::io(e, path))?;
+        if let Some(first) = line.split_whitespace().next() {
+            out.push(first.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Open a file, transparently decompressing `.gz`.
+fn open_maybe_gz(path: &Path) -> Result<Box<dyn BufRead>, Error> {
+    let file = std::fs::File::open(path).map_err(|e| Error::io(e, path))?;
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
+    {
+        Ok(Box::new(BufReader::new(flate2::read::GzDecoder::new(file))))
+    } else {
+        Ok(Box::new(BufReader::new(file)))
+    }
 }
 
 #[cfg(test)]

@@ -629,7 +629,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         }
     }
 
@@ -745,7 +744,6 @@ mod tests {
                 n_junction: 0,
                 junction_motifs: vec![],
                 junction_annotated: vec![],
-                read_seq: vec![],
             };
             assert_eq!(
                 ann.overlapping_genes(&t),

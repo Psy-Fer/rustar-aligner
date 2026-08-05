@@ -37,6 +37,8 @@ pub enum RunMode {
     GenomeGenerate,
     InputAlignmentsFromBAM,
     LiftOver,
+    /// Cell-call an existing raw count matrix, without aligning anything.
+    SoloCellFiltering,
 }
 
 impl std::str::FromStr for RunMode {
@@ -47,9 +49,10 @@ impl std::str::FromStr for RunMode {
             "genomeGenerate" => Ok(Self::GenomeGenerate),
             "inputAlignmentsFromBAM" => Ok(Self::InputAlignmentsFromBAM),
             "liftOver" => Ok(Self::LiftOver),
+            "soloCellFiltering" => Ok(Self::SoloCellFiltering),
             _ => Err(format!(
                 "unknown runMode '{s}'; expected 'alignReads', 'genomeGenerate', \
-                 'inputAlignmentsFromBAM', or 'liftOver'"
+                 'inputAlignmentsFromBAM', 'liftOver', or 'soloCellFiltering'"
             )),
         }
     }
@@ -62,6 +65,7 @@ impl std::fmt::Display for RunMode {
             Self::GenomeGenerate => write!(f, "genomeGenerate"),
             Self::InputAlignmentsFromBAM => write!(f, "inputAlignmentsFromBAM"),
             Self::LiftOver => write!(f, "liftOver"),
+            Self::SoloCellFiltering => write!(f, "soloCellFiltering"),
         }
     }
 }
@@ -465,9 +469,11 @@ impl std::fmt::Display for SoloType {
 )]
 pub struct Parameters {
     // ── Run ─────────────────────────────────────────────────────────────
-    /// Run mode: alignReads or genomeGenerate
-    #[arg(long = "runMode", default_value = "alignReads")]
-    pub run_mode: RunMode,
+    /// Run mode, plus its arguments. `--runMode soloCellFiltering` takes two
+    /// more tokens: the raw count-matrix directory and the output prefix
+    /// (STAR `SoloFeature_loadRawMatrix.cpp`).
+    #[arg(long = "runMode", num_args = 1.., default_values_t = vec!["alignReads".to_string()])]
+    pub run_mode_in: Vec<String>,
 
     /// Number of threads
     #[arg(long = "runThreadN", default_value_t = NonZeroUsize::new(1).unwrap())]
@@ -1113,6 +1119,17 @@ pub struct Parameters {
     #[arg(long = "soloCBmatchWLtype", default_value = "1MM_multi")]
     pub solo_cb_match_wl_type: String,
 
+    /// `CB`: write `Solo.out/<feature>/CellReads.stats`, a per-cell-barcode
+    /// summary of what happened to the reads carrying it. `None` (the default)
+    /// writes nothing.
+    #[arg(long = "soloCellReadStats", default_value = "None")]
+    pub solo_cell_read_stats: String,
+
+    /// Chromosome names treated as mitochondrial, for the `mito` column of
+    /// `CellReads.stats`. `-` (the default) names none.
+    #[arg(long = "genomeChrSetMitochondrial", num_args = 1.., default_values_t = vec!["-".to_string()])]
+    pub genome_chr_set_mitochondrial: Vec<String>,
+
     /// Cell-calling / matrix filtering: None, CellRanger2.2, EmptyDrops_CR, TopCells.
     #[arg(long = "soloCellFilter", num_args = 1.., default_values_t = vec!["CellRanger2.2".to_string(), "3000".to_string(), "0.99".to_string(), "10".to_string()])]
     pub solo_cell_filter: Vec<String>,
@@ -1162,6 +1179,16 @@ pub struct Parameters {
 }
 
 impl Parameters {
+    /// The run mode. Validation guarantees it parses, so this cannot fail
+    /// after `validate()`; before it, an unknown mode reads as `alignReads`
+    /// and validation is what rejects it.
+    pub fn run_mode(&self) -> RunMode {
+        self.run_mode_in
+            .first()
+            .and_then(|m| m.parse().ok())
+            .unwrap_or(RunMode::AlignReads)
+    }
+
     /// Build an output path by concatenating `suffix` onto `out_file_name_prefix`.
     pub fn output_path(&self, suffix: &str) -> PathBuf {
         PathBuf::from(format!("{}{suffix}", self.out_file_name_prefix))
@@ -1353,8 +1380,29 @@ impl Parameters {
             shlex::try_join(args.iter().map(AsRef::as_ref)).ok()
         };
 
+        // The run mode itself must be one this build knows: an unrecognised
+        // one would otherwise fall through to alignReads and silently do
+        // something the user did not ask for.
+        if let Some(mode) = params.run_mode_in.first()
+            && mode.parse::<RunMode>().is_err()
+        {
+            return Err(command.error(
+                ErrorKind::InvalidValue,
+                mode.parse::<RunMode>().unwrap_err(),
+            ));
+        }
+
+        // `--runMode soloCellFiltering <raw dir> <output prefix>`.
+        if params.run_mode() == RunMode::SoloCellFiltering && params.run_mode_in.len() < 3 {
+            return Err(command.error(
+                ErrorKind::WrongNumberOfValues,
+                "--runMode soloCellFiltering needs the raw count-matrix directory and the \
+                 output prefix: --runMode soloCellFiltering /path/to/raw/ /path/to/out/prefix",
+            ));
+        }
+
         // genomeGenerate requires FASTA files
-        if params.run_mode == RunMode::GenomeGenerate && params.genome_fasta_files.is_empty() {
+        if params.run_mode() == RunMode::GenomeGenerate && params.genome_fasta_files.is_empty() {
             return Err(command.error(
                 ErrorKind::MissingRequiredArgument,
                 "--genomeFastaFiles is required when --runMode genomeGenerate",
@@ -1371,7 +1419,7 @@ impl Parameters {
 
         // alignReads requires read files — except SmartSeq, which gets its reads
         // from --readFilesManifest instead.
-        if params.run_mode == RunMode::AlignReads
+        if params.run_mode() == RunMode::AlignReads
             && params.read_files_in.is_empty()
             && params.solo_type != SoloType::SmartSeq
         {
@@ -1408,7 +1456,7 @@ impl Parameters {
         }
 
         // inputAlignmentsFromBAM: only --bamRemoveDuplicatesType is implemented so far
-        if params.run_mode == RunMode::InputAlignmentsFromBAM {
+        if params.run_mode() == RunMode::InputAlignmentsFromBAM {
             let dedup = params.bam_remove_duplicates_type.as_str();
             if dedup == "-" {
                 return Err(command.error(
@@ -1431,7 +1479,7 @@ impl Parameters {
         }
 
         // liftOver requires a chain file and a GTF to lift
-        if params.run_mode == RunMode::LiftOver {
+        if params.run_mode() == RunMode::LiftOver {
             if params.genome_chain_files.is_empty() {
                 return Err(command.error(
                     ErrorKind::MissingRequiredArgument,
@@ -1541,7 +1589,7 @@ impl Parameters {
         // validation time we can only enforce the genomeGenerate rule;
         // for alignReads, GenomeIndex::load checks for the on-disk files
         // and surfaces a clear error if neither source is available.
-        if params.run_mode == RunMode::GenomeGenerate
+        if params.run_mode() == RunMode::GenomeGenerate
             && params.quant_transcriptome_sam()
             && params.sjdb_gtf_file.is_none()
         {
@@ -1552,7 +1600,7 @@ impl Parameters {
         }
 
         // ── STARsolo validation ─────────────────────────────────────────
-        if params.run_mode == RunMode::AlignReads && params.solo_enabled() {
+        if params.run_mode() == RunMode::AlignReads && params.solo_enabled() {
             // CB_UMI_Complex needs one CB position + whitelist per segment.
             if params.solo_type == SoloType::CbUmiComplex {
                 if params.solo_cb_position.is_empty() {
@@ -1709,6 +1757,16 @@ impl Parameters {
                         ),
                     ));
                 }
+            }
+            // --soloCellReadStats: `CB` is the only value STAR defines.
+            if !matches!(params.solo_cell_read_stats.as_str(), "CB" | "None") {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    format!(
+                        "unknown --soloCellReadStats '{}'; expected CB or None",
+                        params.solo_cell_read_stats
+                    ),
+                ));
             }
             // Validate --clipAdapterType.
             if !matches!(
@@ -1884,7 +1942,7 @@ mod tests {
     #[test]
     fn defaults() {
         let p = try_parse(&["--readFilesIn", "reads.fq"]).unwrap();
-        assert_eq!(p.run_mode, RunMode::AlignReads);
+        assert_eq!(p.run_mode(), RunMode::AlignReads);
         assert_eq!(p.run_thread_n, NonZeroUsize::new(1).unwrap());
         assert_eq!(p.run_rng_seed, 777);
         assert_eq!(p.genome_dir, PathBuf::from("./GenomeDir"));
@@ -1978,7 +2036,7 @@ mod tests {
             "11",
         ])
         .unwrap();
-        assert_eq!(p.run_mode, RunMode::GenomeGenerate);
+        assert_eq!(p.run_mode(), RunMode::GenomeGenerate);
         assert_eq!(p.genome_dir, PathBuf::from("/data/genome"));
         assert_eq!(
             p.genome_fasta_files,
@@ -2018,7 +2076,7 @@ mod tests {
             "Basic",
         ])
         .unwrap();
-        assert_eq!(p.run_mode, RunMode::AlignReads);
+        assert_eq!(p.run_mode(), RunMode::AlignReads);
         assert_eq!(p.genome_dir, PathBuf::from("/idx/hg38"));
         assert_eq!(
             p.read_files_in,

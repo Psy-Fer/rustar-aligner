@@ -55,7 +55,7 @@ pub fn run(params: &Parameters) -> anyhow::Result<()> {
     if let Some(hint) = cpu::upgrade_hint() {
         info!("{hint}");
     }
-    info!("runMode: {}", params.run_mode);
+    info!("runMode: {}", params.run_mode_in.join(" "));
     info!("runThreadN: {}", params.run_thread_n);
 
     // Configure the rayon global pool from `--runThreadN` **before**
@@ -68,17 +68,20 @@ pub fn run(params: &Parameters) -> anyhow::Result<()> {
     // RSS for nothing. `build_global` errors if called twice; we
     // ignore the error so the in-process tests that already
     // initialised the pool still work.
-    if usize::from(params.run_thread_n) > 1 {
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(params.run_thread_n.into())
-            .build_global();
-    }
+    //
+    // Configured at every value, `1` included. Skipping the build at 1 does not
+    // yield one thread: it leaves rayon's default of one worker per logical
+    // core, so `--runThreadN 1` ran on the whole machine.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(params.run_thread_n.into())
+        .build_global();
 
-    match params.run_mode {
+    match params.run_mode() {
         RunMode::GenomeGenerate => genome_generate(params),
         RunMode::AlignReads => align_reads(params),
         RunMode::InputAlignmentsFromBAM => bam_dedup::run(params),
         RunMode::LiftOver => liftover::run(params),
+        RunMode::SoloCellFiltering => crate::solo::count::run_cell_filtering(params),
     }
 }
 
