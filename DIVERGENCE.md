@@ -75,7 +75,7 @@ On the 10k yeast PE benchmark, 4 reads differ in alignment score (AS) because ST
 
 **Impact.** Past libc++'s load factor the map rehashes, and the order then depends on the bucket count, which depends on how many distinct barcodes were seen; beyond that size the order diverges. The **values never do** — only which line they appear on. Reading the file by barcode rather than by position is unaffected either way.
 
-**Source.** `src/solo/cell_reads.rs`, locked by `rows_are_emitted_in_reverse_first_appearance_order` and `merging_partials_preserves_order_and_sums`. STAR: `SoloFeature_statsOutput.cpp`.
+**Source.** `src/solo/cell_reads.rs`, locked by `rows_are_emitted_in_reverse_first_appearance_order`. STAR: `SoloFeature_statsOutput.cpp`.
 
 ---
 
