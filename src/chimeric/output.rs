@@ -193,7 +193,7 @@ fn build_segment_record(
     is_supplementary: bool,
     sa_tag: &str,
 ) -> Result<RecordBuf, Error> {
-    use crate::io::fastq::{complement_base, decode_base};
+    use crate::io::reads::{complement_base, decode_base};
     use noodles::sam::alignment::record::data::field::Tag;
 
     let mut record = RecordBuf::default();

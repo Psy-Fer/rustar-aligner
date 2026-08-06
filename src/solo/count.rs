@@ -2329,7 +2329,7 @@ fn open_maybe_gz(path: &Path) -> Result<Box<dyn BufRead>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::fastq::encode_base;
+    use crate::io::reads::encode_base;
     use crate::solo::whitelist::pack_barcode;
 
     #[test]

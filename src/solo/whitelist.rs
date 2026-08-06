@@ -12,7 +12,7 @@
 //! quality, exactly as STAR's `cbMatchString`.
 
 use crate::error::Error;
-use crate::io::fastq::{decode_base, encode_base};
+use crate::io::reads::{decode_base, encode_base};
 use flate2::read::GzDecoder;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
