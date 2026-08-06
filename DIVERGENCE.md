@@ -32,31 +32,27 @@ This is the reason faithfulness is reported **tie-adjusted**. On the 10k yeast b
 
 ### 1.2 `--soloUMIfiltering MultiGeneUMI_All` filters, rather than doing nothing
 
-**What STAR does.** The option is parsed and stored, but its consumption site tests only the `MultiGeneUMI` flag. Selecting `MultiGeneUMI_All` on its own therefore leaves the multi-gene UMI filter entirely off, and the counts are the unfiltered ones. STAR's own documentation describes it as removing a UMI seen in more than one gene from **all** of those genes.
+**What STAR does.** Nothing, in effect — but not because the rule is unimplemented. `SoloFeature_collapseUMIall.cpp:79-88` implements exactly the documented behaviour, zeroing every gene for any UMI seen in more than one:
+
+```cpp
+if (pSolo.umiFiltering.MultiGeneUMI_All) {
+    for (auto &iu : umiGeneMapCount)
+        if (iu.second.size()>1)
+            for (auto &ig : iu.second) ig.second=0; //kill all genes for this UMI
+};
+```
+
+The site that acts on those zeroed counts, however, gates on a different flag (`:116`, `if (pSolo.umiFiltering.MultiGeneUMI && umiGeneMapCount[...]==0)`), and `MultiGeneUMI` and `MultiGeneUMI_All` are set in mutually exclusive branches (`ParametersSolo.cpp:457-462`). Selecting `MultiGeneUMI_All` therefore zeroes the counts and then never reads them, and the run reports unfiltered counts.
 
 **What rustar-aligner does.** The documented behaviour: a UMI seen in more than one gene is removed from all of them.
 
-**Why.** Reproducing the no-op ships a flag that silently does nothing to anyone who read STAR's documentation. This was raised as #144 before any code changed, since "be faithful to STAR" and "do what the flag says" point in opposite directions here. Single-gene UMIs are untouched, which the tests check across every mode.
+**Why.** This is a one-line wiring bug in STAR, not a design decision: STAR's own code, immediately above, computes the documented result and then discards it. Matching the binary would mean shipping a flag that silently does nothing to anyone who read either the documentation or STAR's source, which is what #144 was raised about. So the divergence is from STAR's behaviour but *not* from its intent. Single-gene UMIs are untouched, which the tests check across every mode.
 
 **Impact.** Confined to `--soloUMIfiltering MultiGeneUMI_All`. The default (`-`) and the other filtering modes produce identical counts. Inverting the choice is a one-line change, since the test asserts the behaviour either way.
 
-**Source.** `src/solo/count.rs` (`UmiFiltering::MultiGeneUmiAll`, `filter_multi_gene_umi`), locked by `test_solo_multigene_umi_all_drops_cross_gene_umis`. STAR: `SoloFeature_collapseUMIall.cpp`, `ParametersSolo.cpp`.
+**Source.** `src/solo/count.rs` (`UmiFiltering::MultiGeneUmiAll`, `filter_multi_gene_umi`), locked by `multigene_umi_all_drops_the_umi_from_every_gene` and `multigene_umi_all_parses_to_its_own_variant`. STAR: `SoloFeature_collapseUMIall.cpp`, `ParametersSolo.cpp`.
 
-### 1.3 Homopolymer UMIs other than poly-A are rejected
-
-**What STAR does.** The UMI validity check rejects a homopolymer by comparing the packed UMI against a precomputed all-same-base value, but the loop that builds those values runs over `umiL`, which is zero at that point for `CB_UMI_Simple`. Only the poly-A case (packed value zero) is caught; poly-C, poly-G and poly-T pass through as valid UMIs.
-
-**What rustar-aligner does.** Rejects every homopolymer UMI.
-
-**Why.** A homopolymer UMI is a sequencing artefact whatever base it repeats; letting three of the four through is not a rule, it is the consequence of reading an uninitialised length.
-
-**Impact.** Removes a small number of artefact UMIs from the counts that STAR keeps.
-
-**Source.** `src/solo/whitelist.rs` (`check_umi`), locked by `umi_valid_rejects_every_homopolymer`. STAR: `SoloReadBarcode_getCBandUMI.cpp` (`umiL`).
-
----
-
-### 1.2 `EmptyDrops_CR` Simple-Good-Turing with fewer than five distinct frequencies
+### 1.3 `EmptyDrops_CR` Simple-Good-Turing with fewer than five distinct frequencies
 
 **What STAR does.** The ambient profile for `--soloCellFilter EmptyDrops_CR` is smoothed with Simple Good-Turing (Elworthy's `SimpleGoodTuring/sgt.h`). `analyse()` returns early, doing nothing, when the frequency spectrum has fewer than five distinct counts — Elworthy's `MinInput` guard. `PZero`, the mass reserved for genes unseen in the ambient droplets, is neither assigned in that case nor initialised at construction, so a caller that asks for it reads whatever the stack held.
 
