@@ -1758,6 +1758,23 @@ impl Parameters {
                     ));
                 }
             }
+            // STAR refuses `MultiGeneUMI_CR` unless the dedup is exactly
+            // `1MM_CR` — one value, that value (`ParametersSolo.cpp:463-468`).
+            // The rule exists because the filter decides ownership from the
+            // corrected-UMI map, which only the CellRanger dedup builds.
+            if params
+                .solo_umi_filtering
+                .iter()
+                .any(|f| f == "MultiGeneUMI_CR")
+                && (params.solo_umi_dedup.len() > 1
+                    || params.solo_umi_dedup.first().map(String::as_str) != Some("1MM_CR"))
+            {
+                return Err(command.error(
+                    ErrorKind::InvalidValue,
+                    "--soloUMIfiltering MultiGeneUMI_CR only works with --soloUMIdedup 1MM_CR\n\
+                     SOLUTION: rerun with --soloUMIfiltering MultiGeneUMI_CR --soloUMIdedup 1MM_CR",
+                ));
+            }
             // --soloCellReadStats: `CB` is the only value STAR defines.
             if !matches!(params.solo_cell_read_stats.as_str(), "CB" | "None") {
                 return Err(command.error(
@@ -2627,6 +2644,64 @@ mod tests {
             [[false, true], [false, false]]
         );
         assert!(AlignEndsType::from_str("Bogus").is_err());
+    }
+
+    /// STAR refuses `MultiGeneUMI_CR` unless the dedup is exactly `1MM_CR`
+    /// (`ParametersSolo.cpp:463-468`): the filter decides ownership from the
+    /// corrected-UMI map, which only the CellRanger dedup builds. We accepted
+    /// the combination silently and counted with an uncorrected map.
+    #[test]
+    fn multi_gene_umi_cr_requires_the_cellranger_dedup() {
+        // The solo validation block only runs in solo mode, which is also the
+        // only mode where these flags mean anything.
+        let base = [
+            "--readFilesIn",
+            "cdna.fq",
+            "bc.fq",
+            "--soloType",
+            "CB_UMI_Simple",
+            "--sjdbGTFfile",
+            "genes.gtf",
+            "--soloCBwhitelist",
+            "wl.txt",
+            "--soloUMIfiltering",
+            "MultiGeneUMI_CR",
+        ];
+
+        // Paired with 1MM_CR: accepted.
+        let mut ok = base.to_vec();
+        ok.extend_from_slice(&["--soloUMIdedup", "1MM_CR"]);
+        assert!(try_parse(&ok).is_ok());
+
+        // Default dedup (1MM_All) and any other single value: refused.
+        assert!(try_parse(&base).is_err(), "default dedup should be refused");
+        let mut wrong = base.to_vec();
+        wrong.extend_from_slice(&["--soloUMIdedup", "Exact"]);
+        assert!(try_parse(&wrong).is_err());
+
+        // More than one dedup value is refused even when 1MM_CR is among them,
+        // matching STAR's `typesIn.size()>1` half of the condition.
+        let mut multi = base.to_vec();
+        multi.extend_from_slice(&["--soloUMIdedup", "1MM_CR", "Exact"]);
+        assert!(try_parse(&multi).is_err());
+
+        // The pairing rule applies only to MultiGeneUMI_CR.
+        assert!(
+            try_parse(&[
+                "--readFilesIn",
+                "cdna.fq",
+                "bc.fq",
+                "--soloType",
+                "CB_UMI_Simple",
+                "--sjdbGTFfile",
+                "genes.gtf",
+                "--soloCBwhitelist",
+                "wl.txt",
+                "--soloUMIfiltering",
+                "MultiGeneUMI"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
