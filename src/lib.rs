@@ -655,7 +655,7 @@ fn run_single_pass(
 
     // Initialize statistics collectors
     let stats = Arc::new(crate::stats::AlignmentStats::new());
-    let sj_stats = Arc::new(crate::junction::SpliceJunctionStats::new());
+    let sj_stats = Arc::new(crate::junction::SpliceJunctionStats::with_params(params));
 
     // Clone the quant Arc so each dispatch call can own a reference.
     let quant = quant_ctx.map(Arc::clone);
@@ -911,7 +911,7 @@ fn run_pass1(
     use std::sync::Arc;
 
     let stats = Arc::new(crate::stats::AlignmentStats::new());
-    let sj_stats = Arc::new(crate::junction::SpliceJunctionStats::new());
+    let sj_stats = Arc::new(crate::junction::SpliceJunctionStats::with_params(params));
 
     // Modify params to limit reads for pass 1
     let mut params_pass1 = params.clone();
