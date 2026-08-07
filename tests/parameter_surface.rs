@@ -16,14 +16,16 @@ use std::collections::BTreeSet;
 /// Names accepted by the CLI but with no effect on output, each for a stated
 /// reason. Keeping the list explicit stops "accepted" from quietly meaning
 /// "implemented".
+///
+/// Only half of that claim is machine-checked: `inert_parameters_are_actually
+/// _accepted` verifies each name *is* accepted, but nothing verifies it is
+/// inert. Adding a name here is an assertion made by hand, so check that the
+/// parameter is genuinely unread before adding one — `limitBAMsortRAM` and
+/// `runRNGseed` were both listed here while being implemented.
 const ACCEPTED_BUT_INERT: &[(&str, &str)] = &[
     (
         "genomeFileSizes",
         "an input hint for STAR's loader; no output bytes depend on it",
-    ),
-    (
-        "limitBAMsortRAM",
-        "sorting is bounded by the writer, not by a byte budget",
     ),
     (
         "limitGenomeGenerateRAM",
@@ -74,10 +76,6 @@ const ACCEPTED_BUT_INERT: &[(&str, &str)] = &[
         "runDirPerm",
         "no directories are created whose mode a user could observe",
     ),
-    (
-        "runRNGseed",
-        "multimapper selection is seeded per read, not from a global RNG",
-    ),
 ];
 
 /// Names STAR accepts that this CLI does not yet accept at all. This is the
@@ -113,7 +111,6 @@ const NOT_YET_ACCEPTED: &[&str] = &[
     "clip5pAdapterMMp",
     "clip5pAdapterSeq",
     // Genome index types and transforms.
-    "genomeChrSetMitochondrial",
     "genomeSuffixLengthMax",
     "genomeTransformOutput",
     "genomeType",
@@ -123,9 +120,6 @@ const NOT_YET_ACCEPTED: &[&str] = &[
     "soloAdapterSequence",
     "soloCBtype",
     "soloOutFormatFeaturesGeneField3",
-    // STARsolo Transcript3p / CellReads.stats / cell filtering.
-    "soloCellReadStats",
-    "soloClusterCBfile",
 ];
 
 fn star_parameter_names() -> Vec<String> {
