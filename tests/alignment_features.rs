@@ -2114,3 +2114,93 @@ fn test_run_mode_solo_cell_filtering_requires_its_paths() {
         .assert()
         .failure();
 }
+
+// ---------------------------------------------------------------------------
+// Test — --readNameSeparator cuts the QNAME, and only where asked
+//
+// STAR's default separator is `/` and it cuts the read name there; before #147
+// this codebase kept the whole name. That is the one output change #147 makes
+// at default settings, and the only coverage was a unit test on the paired
+// FASTQ reader plus a parse-level check that the flag reaches Parameters --
+// nothing asserted the QNAME that actually reaches the SAM. This does, in both
+// directions, so neither a regression nor a hardcoded `/` can pass.
+//
+// The bundled yeast tier cannot exercise this: there the `/1` sits in the FASTQ
+// comment, after whitespace, so the QNAME never contains a separator.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_read_name_separator_cuts_the_qname_and_is_configurable() {
+    let tmpdir = TempDir::new().unwrap();
+    let genome = build_genome();
+    let fasta = write_fasta(&tmpdir, &genome);
+    let genome_dir = tmpdir.path().join("genome");
+    build_index(&fasta, &genome_dir, "7", None);
+
+    // Exon2 (chr1:10251-10300), so every read aligns and emits a record.
+    let exon2 = String::from_utf8(genome[10250..10300].to_vec()).unwrap();
+    let reads_path = tmpdir.path().join("slashed.fq");
+    {
+        let mut f = fs::File::create(&reads_path).unwrap();
+        for i in 0..4 {
+            // The separator is inside the QNAME, not in a trailing comment.
+            writeln!(f, "@read{i}/1\n{exon2}\n+\n{}", "I".repeat(exon2.len())).unwrap();
+        }
+    }
+
+    let run = |name: &str, extra: &[&str]| -> Vec<String> {
+        let out = tmpdir.path().join(name);
+        fs::create_dir_all(&out).unwrap();
+        let prefix = format!("{}/", out.display());
+        let mut args: Vec<String> = vec![
+            "--runMode".into(),
+            "alignReads".into(),
+            "--genomeDir".into(),
+            genome_dir.to_str().unwrap().into(),
+            "--readFilesIn".into(),
+            reads_path.to_str().unwrap().into(),
+            "--outSAMtype".into(),
+            "SAM".into(),
+            "--outFileNamePrefix".into(),
+            prefix.clone(),
+        ];
+        args.extend(extra.iter().map(|s| (*s).to_string()));
+        cargo_bin_cmd!("rustar-aligner")
+            .args(&args)
+            .assert()
+            .success();
+
+        fs::read_to_string(out.join("Aligned.out.sam"))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with('@'))
+            .map(|l| l.split('\t').next().unwrap().to_string())
+            .collect()
+    };
+
+    // Default: STAR's `/` separator, so the `/1` is cut away.
+    let defaulted = run("out_default", &[]);
+    assert!(!defaulted.is_empty(), "no records were emitted");
+    for qname in &defaulted {
+        assert!(
+            !qname.contains('/'),
+            "default --readNameSeparator should cut at '/', got {qname}"
+        );
+        assert!(qname.starts_with("read"), "unexpected QNAME shape: {qname}");
+    }
+
+    // `-` disables separators, so the same reads keep their full names. This is
+    // what stops the cut being hardcoded rather than driven by the flag.
+    let disabled = run("out_disabled", &["--readNameSeparator", "-"]);
+    assert_eq!(
+        disabled.len(),
+        defaulted.len(),
+        "the same reads should align either way"
+    );
+    for qname in &disabled {
+        assert!(
+            qname.ends_with("/1"),
+            "--readNameSeparator - should keep the whole name, got {qname}"
+        );
+    }
+}
