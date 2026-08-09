@@ -14,7 +14,7 @@ pub mod gene;
 pub mod smartseq;
 pub mod whitelist;
 
-pub use count::{UmiDedup, UmiFiltering, write_gene_matrix};
+pub use count::{UmiDedup, UmiFiltering, write_matrix_market};
 pub use gene::{
     GeneAssignment, Region, SoloFeature, SoloStrand, VelocytoCategory, assign_gene_se,
     classify_read, velocyto_category,

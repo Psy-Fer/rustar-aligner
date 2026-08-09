@@ -1133,6 +1133,15 @@ pub struct Parameters {
     #[arg(long = "soloOutGzip", default_value = "no")]
     pub solo_out_gzip: String,
 
+    /// Container format(s) for the solo count matrices (rustar extension beyond
+    /// STARsolo). `MTX` (default) is STARsolo's `raw/`+`filtered/` MatrixMarket
+    /// triplet. `Zarr` writes sharded Zarr v3 AnnData stores (`raw.zarr`,
+    /// `filtered.zarr`) and `H5AD` writes `raw.h5ad` / `filtered.h5ad`; both are
+    /// cells × genes (AnnData's obs × var orientation, the transpose of `.mtx`).
+    /// Values combine, e.g. `--soloOutputFormat MTX Zarr`.
+    #[arg(long = "soloOutputFormat", num_args = 1.., default_values_t = vec!["MTX".to_string()])]
+    pub solo_output_format: Vec<String>,
+
     /// Velocyto ambiguous-molecule handling (rustar extension beyond STARsolo).
     /// `yes` (default) writes the three `spliced`/`unspliced`/`ambiguous` matrices
     /// like STARsolo — exon-only molecules with no junction/intron evidence stay in
@@ -1640,6 +1649,29 @@ impl Parameters {
                             "unsupported --soloMultiMappers '{m}'; expected Unique, Uniform, Rescue, PropUnique, or EM"
                         ),
                     ));
+                }
+            }
+            // soloOutputFormat values (and whether this build has the backend).
+            for f in &params.solo_output_format {
+                match crate::solo::adata::OutputFormat::parse(f) {
+                    Some(fmt) if fmt.is_available() => {}
+                    Some(fmt) => {
+                        return Err(command.error(
+                            ErrorKind::InvalidValue,
+                            format!(
+                                "--soloOutputFormat {f} needs the `{}` cargo feature, which this binary was built without",
+                                fmt.cargo_feature(),
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err(command.error(
+                            ErrorKind::InvalidValue,
+                            format!(
+                                "unsupported --soloOutputFormat '{f}'; expected MTX, Zarr, or H5AD"
+                            ),
+                        ));
+                    }
                 }
             }
             // Gene-level features need a gene model (SJ does not — junctions come

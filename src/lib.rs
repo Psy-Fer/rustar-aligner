@@ -437,7 +437,7 @@ fn write_solo_output(
             recorder.n_multi_records(),
         );
     }
-    crate::solo::write_gene_matrix(sctx, params, stats, Some(&**sj_stats), &index.genome)?;
+    crate::solo::write_matrix_market(sctx, params, stats, Some(&**sj_stats), &index.genome)?;
     Ok(())
 }
 

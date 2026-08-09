@@ -12,6 +12,9 @@
 use crate::error::Error;
 use crate::solo::whitelist::CbWhitelist;
 use crate::solo::{SoloContext, SoloCountRecord};
+use anndata::{AnnData, Backend};
+use anndata_zarr::Zarr;
+use nalgebra_sparse::{CooMatrix, CsrMatrix};
 // FxHash (non-cryptographic) rather than std's SipHash: every map here is keyed
 // on packed integers (u64 UMIs, u32 gene/cell ids) on the per-cell UMI-dedup hot
 // path, where SipHash is ~3-5x slower and buys nothing. Output is unchanged —
@@ -476,6 +479,138 @@ fn build_matrix_body(
     ))
 }
 
+/// Create a CSR matrix and corresponding "obs" i.e., cell vector of relevant stats.
+#[allow(clippy::too_many_arguments)]
+fn ctx_to_csr_and_stats(
+    ctx: &SoloContext,
+    recorder: &crate::solo::SoloRecorder,
+    method: UmiDedup,
+    filtering: UmiFiltering,
+    umi_len: usize,
+    pseudocount: f64,
+    n_features: usize,
+) -> Result<(CsrMatrix<u64>, Vec<CellStat>), Error> {
+    // Move records out of the recorder; fold in resolved 1MM_multi cells.
+    let mut records = std::mem::take(&mut *recorder.records.lock().unwrap());
+    let exact_counts = ctx.whitelist.exact_count_snapshot();
+    let multi = std::mem::take(&mut *recorder.multi_records.lock().unwrap());
+    for m in &multi {
+        if let Some(cb) = resolve_multi_cb(&m.candidates, &exact_counts, pseudocount) {
+            records.push(SoloCountRecord {
+                cb,
+                umi: m.umi,
+                gene: m.gene,
+            });
+        }
+    }
+    drop(multi);
+
+    // Group each cell's reads together (parallel sort — the record vec is large).
+    use rayon::prelude::*;
+    records.par_sort_unstable_by_key(|r| r.cb);
+
+    // One contiguous [start, end) slice per CB.
+    let mut bounds: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < records.len() {
+        let cb = records[i].cb;
+        let mut j = i + 1;
+        while j < records.len() && records[j].cb == cb {
+            j += 1;
+        }
+        bounds.push((i, j));
+        i = j;
+    }
+
+    // Per-cell dedup is independent across cells, so
+    // run it in parallel and emit the pre-formatted bodies sequentially in CB
+    // order. This keeps the matrix byte-identical to the serial version.
+    struct CellOut {
+        genes: Vec<usize>,
+        counts: Vec<u64>,
+        stat: CellStat,
+    }
+    let data = bounds
+        .par_iter()
+        .map(|&(i, j)| {
+            let cb = records[i].cb;
+
+            // umi → gene → read multiplicity, for this cell only.
+            let mut umi_genes: HashMap<u64, HashMap<u32, u32>> = HashMap::default();
+            for r in &records[i..j] {
+                *umi_genes
+                    .entry(r.umi)
+                    .or_default()
+                    .entry(r.gene)
+                    .or_insert(0) += 1;
+            }
+
+            // (gene → (umi → read_count)) after multi-gene UMI filtering.
+            let mut gene_umis: HashMap<u32, HashMap<u64, u32>> = HashMap::default();
+            for (&umi, genes) in &umi_genes {
+                for (&gene, &rc) in filter_multi_gene_umi(genes, filtering) {
+                    *gene_umis.entry(gene).or_default().entry(umi).or_insert(0) += rc;
+                }
+            }
+
+            // Collapse UMIs per gene, then emit this cell's entries gene-ascending.
+            let mut cell_entries: Vec<(u32, u64)> = Vec::with_capacity(gene_umis.len());
+            for (&gene, umis) in &gene_umis {
+                let count = dedup_count(umis, method, umi_len);
+                if count > 0 {
+                    cell_entries.push((gene, count));
+                }
+            }
+            cell_entries.sort_unstable_by_key(|&(g, _)| g);
+
+            let n_reads = (j - i) as u64;
+            let n_genes = cell_entries.len();
+            let mut n_umis = 0u64;
+            let mut genes = Vec::with_capacity(n_genes);
+            let mut counts = Vec::with_capacity(n_genes);
+            for (g, c) in &cell_entries {
+                n_umis += c;
+                genes.push(*g as usize);
+                counts.push(*c);
+            }
+            let stat = CellStat {
+                cb,
+                n_reads,
+                n_umis,
+                n_genes: n_genes as u32,
+            };
+            CellOut {
+                genes,
+                counts,
+                stat,
+            }
+        })
+        .collect::<Vec<CellOut>>();
+    // The per-cell entries are already gene-ascending and `data` is CB-ascending,
+    // so concatenating them *is* CSR (row = cell, col = gene).
+    let nnz: usize = data.iter().map(|co| co.genes.len()).sum();
+    let mut row_offsets = Vec::with_capacity(data.len() + 1);
+    let mut col_indices = Vec::with_capacity(nnz);
+    let mut values = Vec::with_capacity(nnz);
+    let mut stats = Vec::with_capacity(data.len());
+    row_offsets.push(0);
+    for co in data {
+        col_indices.extend_from_slice(&co.genes);
+        values.extend_from_slice(&co.counts);
+        row_offsets.push(col_indices.len());
+        stats.push(co.stat);
+    }
+    let csr = CsrMatrix::try_from_csr_data(
+        row_offsets.len() - 1,
+        n_features,
+        row_offsets,
+        col_indices,
+        values,
+    )
+    .map_err(|e| Error::Parameter(format!("building solo count matrix: {e}")))?;
+    Ok((csr, stats))
+}
+
 /// Write a final `matrix.mtx[.gz]` = MatrixMarket header + (optionally
 /// cb-remapped/filtered) body. With `remap = None` the body is copied verbatim
 /// (raw); with `Some(map)` only columns in the map survive, renumbered to the
@@ -808,6 +943,71 @@ fn build_multi_matrices(
     Ok(())
 }
 
+/// CSR variant of [`build_multi_matrices`]: given the unique counts as a
+/// cells×genes CSR (row `i` = cell `stats[i].cb`, as built by
+/// [`ctx_to_csr_and_stats`]), yields one real-valued `UniqueAndMult` matrix per
+/// `--soloMultiMappers` method, in `methods` order. Cells present only in
+/// `multi_records` (no unique gene, hence no row) are skipped, as in STAR.
+fn multi_matrices<'a>(
+    unique: &'a CsrMatrix<u64>,
+    stats: &[CellStat],
+    multi_records: &[crate::solo::MultiGeneRecord],
+    methods: &'a [MultiMethod],
+) -> impl Iterator<Item = Result<(MultiMethod, CsrMatrix<f64>), Error>> + 'a {
+    // Per-row multi molecules: one gene set per deduplicated UMI, row-aligned.
+    let mut by_cb: HashMap<u32, HashMap<u64, std::collections::BTreeSet<u32>>> = HashMap::default();
+    for r in multi_records {
+        by_cb
+            .entry(r.cb)
+            .or_default()
+            .entry(r.umi)
+            .or_default()
+            .extend(r.genes.iter().copied());
+    }
+    let mols: Vec<Vec<Vec<u32>>> = stats
+        .iter()
+        .map(|s| {
+            by_cb.remove(&s.cb).map_or_else(Vec::new, |umis| {
+                umis.into_values()
+                    .map(|g| g.into_iter().collect())
+                    .collect()
+            })
+        })
+        .collect();
+
+    methods.iter().map(move |&m| {
+        let mut row_offsets = Vec::with_capacity(unique.nrows() + 1);
+        let mut col_indices = Vec::with_capacity(unique.nnz());
+        let mut values = Vec::with_capacity(unique.nnz());
+        row_offsets.push(0);
+        for (row, cell_mols) in unique.row_iter().zip(&mols) {
+            let u: HashMap<u32, f64> = row
+                .col_indices()
+                .iter()
+                .zip(row.values())
+                .map(|(&g, &v)| (g as u32, v as f64))
+                .collect();
+            let mut entries: Vec<(u32, f64)> = distribute_multi(m, &u, cell_mols)
+                .into_iter()
+                .filter(|&(_, v)| v > 1e-9)
+                .collect();
+            entries.sort_unstable_by_key(|&(g, _)| g);
+            col_indices.extend(entries.iter().map(|&(g, _)| g as usize));
+            values.extend(entries.iter().map(|&(_, v)| v));
+            row_offsets.push(col_indices.len());
+        }
+        CsrMatrix::try_from_csr_data(
+            row_offsets.len() - 1,
+            unique.ncols(),
+            row_offsets,
+            col_indices,
+            values,
+        )
+        .map(|csr| (m, csr))
+        .map_err(|e| Error::Parameter(format!("building UniqueAndMult-{} matrix: {e}", m.name())))
+    })
+}
+
 /// Apply `--soloUMIfiltering` to the gene→read_count map of a single UMI,
 /// returning the surviving (gene, read_count) entries.
 fn filter_multi_gene_umi(genes: &HashMap<u32, u32>, filtering: UmiFiltering) -> Vec<(&u32, &u32)> {
@@ -877,13 +1077,14 @@ fn called_cells(cells: &[CellStat], filter: &[String]) -> Option<Vec<u32>> {
 
 /// `--soloCellFilter EmptyDrops_CR`: the CR2.2-knee guaranteed cells PLUS cells
 /// rescued by the EmptyDrops multinomial Monte-Carlo test (STAR
-/// `SoloFeature_emptyDrops_CR.cpp`). Per-cell gene profiles for the ambient +
-/// candidate cells are read back from the raw matrix body. `filter` is the
+/// `SoloFeature_emptyDrops_CR.cpp`). `triplets` streams the raw counts as 0-based
+/// `(gene, cb, count)` — only the ambient + candidate cells are kept, so it need
+/// not be materialized. `filter` is the
 /// `EmptyDrops_CR nExpected maxPct maxMinRatio indMin indMax umiMin
 /// umiMinFracMedian candMaxN FDR [simN]` argument list.
 fn emptydrops_called(
     cells: &[CellStat],
-    body: &tempfile::NamedTempFile,
+    triplets: impl Iterator<Item = Result<(u32, u32, u32), Error>>,
     n_features: usize,
     filter: &[String],
 ) -> Result<Vec<u32>, Error> {
@@ -931,21 +1132,12 @@ fn emptydrops_called(
         .map(|c| c.cb)
         .collect();
 
-    // Re-read the raw body for ambient (summed) + per-candidate profiles.
+    // Stream the raw counts for ambient (summed) + per-candidate profiles.
     let mut ambient = vec![0f64; n_features];
     let mut amb_total = 0f64;
     let mut cand_profiles: HashMap<u32, Vec<(u32, u32)>> = HashMap::default();
-    let reader =
-        BufReader::new(std::fs::File::open(body.path()).map_err(|e| Error::io(e, body.path()))?);
-    for line in reader.lines() {
-        let line = line.map_err(|e| Error::io(e, body.path()))?;
-        let mut it = line.split(' ');
-        let (Some(gt), Some(ct), Some(vt)) = (it.next(), it.next(), it.next()) else {
-            continue;
-        };
-        let g = gt.parse::<u32>().unwrap_or(1) - 1;
-        let cb = ct.parse::<u32>().unwrap_or(1) - 1;
-        let v = vt.parse::<u32>().unwrap_or(0);
+    for t in triplets {
+        let (g, cb, v) = t?;
         if ambient_set.contains(&cb) {
             ambient[g as usize] += v as f64;
             amb_total += v as f64;
@@ -1078,6 +1270,29 @@ fn emptydrops_called(
     Ok(called)
 }
 
+/// Stream a MatrixMarket body (`gene+1 cb+1 count` per line) as 0-based
+/// `(gene, cb, count)` triplets, for `emptydrops_called`.
+fn body_triplets(
+    path: &Path,
+) -> Result<impl Iterator<Item = Result<(u32, u32, u32), Error>>, Error> {
+    let path = path.to_path_buf();
+    let reader = BufReader::new(std::fs::File::open(&path).map_err(|e| Error::io(e, &path))?);
+    Ok(reader.lines().filter_map(move |line| match line {
+        Err(e) => Some(Err(Error::io(e, &path))),
+        Ok(l) => {
+            let mut it = l.split(' ');
+            let (Some(gt), Some(ct), Some(vt)) = (it.next(), it.next(), it.next()) else {
+                return None;
+            };
+            Some(Ok((
+                gt.parse::<u32>().unwrap_or(1) - 1,
+                ct.parse::<u32>().unwrap_or(1) - 1,
+                vt.parse::<u32>().unwrap_or(0),
+            )))
+        }
+    }))
+}
+
 /// Median of an ascending-sorted slice (0 if empty).
 fn median_sorted(sorted: &[u64]) -> u64 {
     let n = sorted.len();
@@ -1090,9 +1305,247 @@ fn median_sorted(sorted: &[u64]) -> u64 {
     }
 }
 
+/// Write as much info as possible in a single anndata store
+pub fn write_anndata(
+    ctx: &SoloContext,
+    params: &crate::params::Parameters,
+    align_stats: &crate::stats::AlignmentStats,
+    sj_stats: Option<&crate::junction::SpliceJunctionStats>,
+    genome: &crate::genome::Genome,
+) -> Result<(), Error> {
+    let CbWhitelist::List { sorted, .. } = &ctx.whitelist else {
+        log::warn!(
+            "STARsolo: --soloCBwhitelist None matrix output is not yet supported (Phase 14.4); skipping matrix"
+        );
+        return Ok(());
+    };
+
+    let method: UmiDedup = params
+        .solo_umi_dedup
+        .first()
+        .map_or("1MM_All", String::as_str)
+        .parse()
+        .unwrap_or(UmiDedup::OneMmAll);
+    let filtering: UmiFiltering = params
+        .solo_umi_filtering
+        .first()
+        .map_or("-", String::as_str)
+        .parse()
+        .unwrap_or(UmiFiltering::None);
+    // `*_pseudocounts` CB-match types add 1 to the posterior prior.
+    let pseudocount = if params.solo_cb_match_wl_type.contains("pseudocounts") {
+        1.0
+    } else {
+        0.0
+    };
+    let umi_len = params.solo_umi_len as usize;
+
+    let solo_dir = params
+        .solo_out_file_names
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "Solo.out/".to_string());
+    let features_name = params
+        .solo_out_file_names
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "features.tsv".to_string());
+    let barcodes_name = params
+        .solo_out_file_names
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "barcodes.tsv".to_string());
+    let matrix_name = params
+        .solo_out_file_names
+        .get(3)
+        .cloned()
+        .unwrap_or_else(|| "matrix.mtx".to_string());
+
+    // Global mapping funnel (shared across features). The region tallies are
+    // CellRanger-style positional bins over uniquely-mapped reads, populated only
+    // when both Gene and GeneFull run (otherwise the split is unavailable).
+    use std::sync::atomic::Ordering;
+    let total_reads = align_stats.total_reads.load(Ordering::Relaxed);
+    let mapped_unique = align_stats.uniquely_mapped.load(Ordering::Relaxed);
+    let mapped_multi = align_stats.multi_mapped.load(Ordering::Relaxed);
+    let valid_barcodes = ctx.stats.yes_exact.load(Ordering::Relaxed)
+        + ctx.stats.yes_one_mm.load(Ordering::Relaxed)
+        + ctx.stats.yes_mult_mm.load(Ordering::Relaxed);
+    let reads_of = |f: crate::solo::SoloFeature| -> u64 {
+        ctx.features
+            .iter()
+            .position(|&x| x == f)
+            .map_or(0, |i| ctx.feature_reads[i].load(Ordering::Relaxed))
+    };
+    let have_funnel = ctx.features.contains(&crate::solo::SoloFeature::Gene)
+        && ctx.features.contains(&crate::solo::SoloFeature::GeneFull);
+    let region = have_funnel.then(|| RegionFunnel {
+        exonic: ctx.region_stats.exonic.load(Ordering::Relaxed),
+        intronic: ctx.region_stats.intronic.load(Ordering::Relaxed),
+        intergenic: ctx.region_stats.intergenic.load(Ordering::Relaxed),
+        antisense: ctx.region_stats.antisense.load(Ordering::Relaxed),
+    });
+
+    let gzip = matches!(params.solo_out_gzip.as_str(), "yes" | "Yes" | "true");
+    let n_genes = ctx.gene_ann.gene_ids.len();
+    let multi_methods = MultiMethod::parse_list(&params.solo_multi_mappers);
+    let adata: AnnData<Zarr> = AnnData::open(
+        Zarr::open_rw(params.output_path(&format!("{solo_dir}/{matrix_name}.zarr"))).unwrap(),
+    )
+    .unwrap(); // TODO: unwrap.
+    // One {prefix}{soloOutFileNames[0]}<feature>/{raw,filtered}/ per feature.
+    for (feature, recorder) in ctx.features.iter().zip(&ctx.recorders) {
+        let (csr, stats) = ctx_to_csr_and_stats(
+            ctx,
+            recorder,
+            method,
+            filtering,
+            umi_len,
+            pseudocount,
+            n_genes,
+        )?;
+
+        // Filtered (cell-called) matrix per --soloCellFilter. EmptyDrops_CR runs
+        // the Monte-Carlo rescue (needs the per-cell profiles in the body).
+        let called = if params
+            .solo_cell_filter
+            .first()
+            .is_some_and(|m| m == "EmptyDrops_CR")
+        {
+            Some(emptydrops_called(
+                &stats,
+                csr.triplet_iter()
+                    .map(|(row, col, &v)| Ok((col as u32, stats[row].cb, v as u32))),
+                n_genes,
+                &params.solo_cell_filter,
+            )?)
+        } else {
+            called_cells(&stats, &params.solo_cell_filter)
+        };
+
+        // CLAUDE: --soloMultiMappers: UniqueAndMult-<method> as a layer
+        let multi_records = if !multi_methods.is_empty() {
+            let mg = recorder.multi_gene.lock().unwrap();
+            Some(multi_matrices(&csr, &stats, &mg, &multi_methods))
+        } else {
+            None
+        };
+        // The Summary.csv statistics for this feature.
+        let mut gene_seen = vec![false; n_genes];
+        for &g in csr.col_indices() {
+            gene_seen[g as usize] = true;
+        }
+        let varm_df = feature_summary(
+            &stats,
+            gene_seen.iter().filter(|&&s| s).count() as u32,
+            total_reads,
+            valid_barcodes,
+            mapped_unique,
+            mapped_multi,
+            reads_of(*feature),
+        );
+        // CLAUDE: store `summary` (+ `cr_summary` below) in the store
+    }
+
+    // The CellRanger funnel is global, not per-feature (the MTX path just repeats
+    // it in every feature directory).
+    let cr_summary = region.map(|r| cellranger_summary(total_reads, mapped_unique, r));
+
+    // SJ (splice-junction) feature: rows are the SJ.out.tab junctions.
+    if ctx.sj_enabled
+        && let Some(sjs) = sj_stats
+    {
+        let sj_dir = params.output_path(&format!("{solo_dir}SJ/raw/"));
+        std::fs::create_dir_all(&sj_dir).map_err(|e| Error::io(e, &sj_dir))?;
+        let order = sjs.sj_feature_order(params); // (intron_start, intron_end), row order
+        let row: HashMap<(u64, u64), u32> = order
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| (k, i as u32))
+            .collect();
+        // features.tsv = the SJ.out.tab lines (same sorted order as the rows).
+        write_file(&sj_dir.join(&features_name), gzip, |w| {
+            sjs.write_sj_lines(w, genome, params).map(|_| ())
+        })?;
+        write_barcodes(
+            &sj_dir.join(&barcodes_name),
+            &ctx.whitelist,
+            sorted.len(),
+            gzip,
+        )?;
+        let umi_len = params.solo_umi_len as usize;
+        let nnz = build_sj_matrix(
+            &ctx.sj_records.lock().unwrap(),
+            &row,
+            method,
+            umi_len,
+            &sj_dir.join(&matrix_name),
+            order.len(),
+            sorted.len(),
+            gzip,
+        )?;
+        log::info!(
+            "STARsolo: wrote SJ/raw matrix ({} junctions × {} barcodes, {} entries)",
+            order.len(),
+            sorted.len(),
+            nnz,
+        );
+    }
+
+    // Velocyto feature: spliced / unspliced / ambiguous gene×cell matrices.
+    if ctx.velocyto_enabled {
+        let velo_dir = params.output_path(&format!("{solo_dir}Velocyto/raw/"));
+        std::fs::create_dir_all(&velo_dir).map_err(|e| Error::io(e, &velo_dir))?;
+        write_features(
+            &velo_dir.join(&features_name),
+            &ctx.gene_ann.gene_ids,
+            &ctx.gene_ann.gene_names,
+            gzip,
+        )?;
+        write_barcodes(
+            &velo_dir.join(&barcodes_name),
+            &ctx.whitelist,
+            sorted.len(),
+            gzip,
+        )?;
+        let umi_len = params.solo_umi_len as usize;
+        // `--soloVelocytoAmbiguous no` folds exon-only molecules into spliced and
+        // omits ambiguous.mtx (rustar extension); default `yes` = STARsolo 3-matrix.
+        let keep_ambiguous = !matches!(
+            params.solo_velocyto_ambiguous.as_str(),
+            "no" | "No" | "false"
+        );
+        let nnz = build_velocyto_matrices(
+            &ctx.velocyto_records.lock().unwrap(),
+            method,
+            umi_len,
+            &velo_dir,
+            n_genes,
+            sorted.len(),
+            gzip,
+            keep_ambiguous,
+        )?;
+        if keep_ambiguous {
+            log::info!(
+                "STARsolo: wrote Velocyto/raw matrices (spliced={} unspliced={} ambiguous={} entries)",
+                nnz[0],
+                nnz[1],
+                nnz[2],
+            );
+        } else {
+            log::info!(
+                "STARsolo: wrote Velocyto/raw matrices, ambiguous folded into spliced (spliced={} unspliced={} entries)",
+                nnz[0],
+                nnz[1],
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Write the raw gene-count matrix + `Summary.csv` for a finished solo run.
 /// No-op (with a warning) when there is no explicit whitelist.
-pub fn write_gene_matrix(
+pub fn write_matrix_market(
     ctx: &SoloContext,
     params: &crate::params::Parameters,
     align_stats: &crate::stats::AlignmentStats,
@@ -1233,7 +1686,7 @@ pub fn write_gene_matrix(
         {
             Some(emptydrops_called(
                 &mstats.cells,
-                &body,
+                body_triplets(body.path())?,
                 n_genes,
                 &params.solo_cell_filter,
             )?)
@@ -1656,6 +2109,115 @@ fn write_summary(
     mapped_multi: u64,
     feature_mapped: u64,
 ) -> Result<(), Error> {
+    let s = feature_summary(
+        &mstats.cells,
+        mstats.genes_detected,
+        total_reads,
+        valid_barcodes,
+        mapped_unique,
+        mapped_multi,
+        feature_mapped,
+    );
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let mut row = |k: &str, v: String| {
+        let _ = writeln!(out, "{k},{v}");
+    };
+    row("Number of Reads", s.n_reads.to_string());
+    row(
+        "Reads With Valid Barcodes",
+        format!("{:.6}", s.frac_valid_barcodes),
+    );
+    row("Sequencing Saturation", format!("{:.6}", s.saturation));
+    row(
+        "Reads Mapped to Genome: Unique+Multiple",
+        format!("{:.6}", s.frac_mapped_genome_unique_multi),
+    );
+    row(
+        "Reads Mapped to Genome: Unique",
+        format!("{:.6}", s.frac_mapped_genome_unique),
+    );
+    row(
+        &format!("Reads Mapped to {feature_name}: Unique {feature_name}"),
+        format!("{:.6}", s.frac_mapped_feature_unique),
+    );
+    row("Estimated Number of Cells", s.n_cells.to_string());
+    row(
+        &format!("Unique Reads in Cells Mapped to {feature_name}"),
+        s.reads_in_cells.to_string(),
+    );
+    row(
+        "Fraction of Unique Reads in Cells",
+        format!("{:.6}", s.frac_reads_in_cells),
+    );
+    row("Mean Reads per Cell", s.mean_reads_per_cell.to_string());
+    row("Median Reads per Cell", s.median_reads_per_cell.to_string());
+    row("UMIs in Cells", s.umis_in_cells.to_string());
+    row("Mean UMI per Cell", s.mean_umis_per_cell.to_string());
+    row("Median UMI per Cell", s.median_umis_per_cell.to_string());
+    row(
+        &format!("Mean {feature_name} per Cell"),
+        s.mean_features_per_cell.to_string(),
+    );
+    row(
+        &format!("Median {feature_name} per Cell"),
+        s.median_features_per_cell.to_string(),
+    );
+    row(
+        &format!("Total {feature_name} Detected"),
+        s.features_detected.to_string(),
+    );
+    std::fs::write(path, out).map_err(|e| Error::io(e, path))
+}
+
+/// The `Summary.csv` statistics for one feature, before any formatting: fractions
+/// are raw ratios in `[0, 1]`, counts are counts. `write_summary` renders these as
+/// the STARsolo CSV; other output formats (AnnData) can consume them directly.
+#[derive(Clone, Copy, Debug)]
+pub struct FeatureSummary {
+    /// Reads in the input (all barcodes, mapped or not).
+    pub n_reads: u64,
+    /// Fraction of reads whose CB matched the whitelist.
+    pub frac_valid_barcodes: f64,
+    /// 1 − UMIs / reads over all barcodes.
+    pub saturation: f64,
+    /// Fraction of reads mapped to the genome, uniquely or multi-mapping.
+    pub frac_mapped_genome_unique_multi: f64,
+    /// Fraction of reads mapped uniquely to the genome.
+    pub frac_mapped_genome_unique: f64,
+    /// Fraction of reads assigned uniquely to this feature (gene / SJ / …).
+    pub frac_mapped_feature_unique: f64,
+    /// Cells called by the CR2.2 knee on per-barcode UMI totals.
+    pub n_cells: usize,
+    /// Feature-assigned reads in called cells.
+    pub reads_in_cells: u64,
+    /// `reads_in_cells` over the feature-assigned reads of all barcodes.
+    pub frac_reads_in_cells: f64,
+    pub mean_reads_per_cell: u64,
+    pub median_reads_per_cell: u64,
+    /// Deduplicated UMIs in called cells.
+    pub umis_in_cells: u64,
+    pub mean_umis_per_cell: u64,
+    pub median_umis_per_cell: u64,
+    pub mean_features_per_cell: u64,
+    pub median_features_per_cell: u64,
+    /// Features with a nonzero count anywhere in the raw matrix.
+    pub features_detected: u32,
+}
+
+/// Compute [`FeatureSummary`] from the per-cell stats plus the global mapping
+/// funnel. `cell_stats` is the raw (unfiltered) per-barcode set; cell calling
+/// happens here.
+#[allow(clippy::too_many_arguments)]
+pub fn feature_summary(
+    cell_stats: &[CellStat],
+    features_detected: u32,
+    total_reads: u64,
+    valid_barcodes: u64,
+    mapped_unique: u64,
+    mapped_multi: u64,
+    feature_mapped: u64,
+) -> FeatureSummary {
     let frac = |num: u64| -> f64 {
         if total_reads == 0 {
             0.0
@@ -1665,15 +2227,15 @@ fn write_summary(
     };
 
     // Cell calling: CR2.2 knee on per-barcode UMI totals.
-    let mut umis_desc: Vec<u64> = mstats.cells.iter().map(|c| c.n_umis).collect();
+    let mut umis_desc: Vec<u64> = cell_stats.iter().map(|c| c.n_umis).collect();
     umis_desc.sort_unstable_by(|a, b| b.cmp(a));
-    let thr = knee_cr22(&umis_desc, 3000, 0.99, 10.0);
-    let cells: Vec<&CellStat> = mstats.cells.iter().filter(|c| c.n_umis >= thr).collect();
+    let thr: u64 = knee_cr22(&umis_desc, 3000, 0.99, 10.0);
+    let cells: Vec<&CellStat> = cell_stats.iter().filter(|c| c.n_umis >= thr).collect();
     let n_cells = cells.len();
 
     // Totals across all barcodes (for sequencing saturation + fraction-in-cells).
-    let total_reads_counted: u64 = mstats.cells.iter().map(|c| c.n_reads).sum();
-    let total_umis_all: u64 = mstats.cells.iter().map(|c| c.n_umis).sum();
+    let total_reads_counted: u64 = cell_stats.iter().map(|c| c.n_reads).sum();
+    let total_umis_all: u64 = cell_stats.iter().map(|c| c.n_umis).sum();
     let saturation = if total_reads_counted > 0 {
         1.0 - total_umis_all as f64 / total_reads_counted as f64
     } else {
@@ -1697,71 +2259,29 @@ fn write_summary(
         }
     };
 
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    let mut row = |k: &str, v: String| {
-        let _ = writeln!(out, "{k},{v}");
-    };
-    row("Number of Reads", total_reads.to_string());
-    row(
-        "Reads With Valid Barcodes",
-        format!("{:.6}", frac(valid_barcodes)),
-    );
-    row("Sequencing Saturation", format!("{saturation:.6}"));
-    row(
-        "Reads Mapped to Genome: Unique+Multiple",
-        format!("{:.6}", frac(mapped_unique + mapped_multi)),
-    );
-    row(
-        "Reads Mapped to Genome: Unique",
-        format!("{:.6}", frac(mapped_unique)),
-    );
-    row(
-        &format!("Reads Mapped to {feature_name}: Unique {feature_name}"),
-        format!("{:.6}", frac(feature_mapped)),
-    );
-    row("Estimated Number of Cells", n_cells.to_string());
-    row(
-        &format!("Unique Reads in Cells Mapped to {feature_name}"),
-        reads_in_cells.to_string(),
-    );
-    row(
-        "Fraction of Unique Reads in Cells",
-        format!(
-            "{:.6}",
-            if total_reads_counted > 0 {
-                reads_in_cells as f64 / total_reads_counted as f64
-            } else {
-                0.0
-            }
-        ),
-    );
-    row("Mean Reads per Cell", mean(reads_in_cells).to_string());
-    row(
-        "Median Reads per Cell",
-        median_sorted(&reads_sorted).to_string(),
-    );
-    row("UMIs in Cells", umis_in_cells.to_string());
-    row("Mean UMI per Cell", mean(umis_in_cells).to_string());
-    row(
-        "Median UMI per Cell",
-        median_sorted(&umis_sorted).to_string(),
-    );
-    row(
-        &format!("Mean {feature_name} per Cell"),
-        mean(genes_sorted.iter().sum()).to_string(),
-    );
-    row(
-        &format!("Median {feature_name} per Cell"),
-        median_sorted(&genes_sorted).to_string(),
-    );
-    row(
-        &format!("Total {feature_name} Detected"),
-        mstats.genes_detected.to_string(),
-    );
-
-    std::fs::write(path, out).map_err(|e| Error::io(e, path))?;
-    Ok(())
+    FeatureSummary {
+        n_reads: total_reads,
+        frac_valid_barcodes: frac(valid_barcodes),
+        saturation,
+        frac_mapped_genome_unique_multi: frac(mapped_unique + mapped_multi),
+        frac_mapped_genome_unique: frac(mapped_unique),
+        frac_mapped_feature_unique: frac(feature_mapped),
+        n_cells,
+        reads_in_cells,
+        frac_reads_in_cells: if total_reads_counted > 0 {
+            reads_in_cells as f64 / total_reads_counted as f64
+        } else {
+            0.0
+        },
+        mean_reads_per_cell: mean(reads_in_cells),
+        median_reads_per_cell: median_sorted(&reads_sorted),
+        umis_in_cells,
+        mean_umis_per_cell: mean(umis_in_cells),
+        median_umis_per_cell: median_sorted(&umis_sorted),
+        mean_features_per_cell: mean(genes_sorted.iter().sum()),
+        median_features_per_cell: median_sorted(&genes_sorted),
+        features_detected,
+    }
 }
 
 /// Write the CellRanger-style positional mapping funnel (exonic / intronic /
@@ -1775,6 +2295,55 @@ fn write_cellranger_summary(
     mapped_unique: u64,
     region: RegionFunnel,
 ) -> Result<(), Error> {
+    let s = cellranger_summary(total_reads, mapped_unique, region);
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let mut row = |k: &str, v: String| {
+        let _ = writeln!(out, "{k},{v}");
+    };
+    row("Number of Reads", s.n_reads.to_string());
+    row(
+        "Reads Mapped to Genome: Unique",
+        format!("{:.6}", s.frac_mapped_genome_unique),
+    );
+    row(
+        "Reads Mapped Confidently to Exonic Regions",
+        format!("{:.6}", s.frac_exonic),
+    );
+    row(
+        "Reads Mapped Confidently to Intronic Regions",
+        format!("{:.6}", s.frac_intronic),
+    );
+    row(
+        "Reads Mapped Confidently to Intergenic Regions",
+        format!("{:.6}", s.frac_intergenic),
+    );
+    row(
+        "Reads Mapped Antisense to Gene",
+        format!("{:.6}", s.frac_antisense),
+    );
+    std::fs::write(path, out).map_err(|e| Error::io(e, path))
+}
+
+/// The `CellRanger.summary.csv` statistics, before formatting: the positional
+/// funnel as raw fractions of all input reads.
+#[derive(Clone, Copy, Debug)]
+pub struct CellRangerSummary {
+    /// Reads in the input (all barcodes, mapped or not).
+    pub n_reads: u64,
+    pub frac_mapped_genome_unique: f64,
+    pub frac_exonic: f64,
+    pub frac_intronic: f64,
+    pub frac_intergenic: f64,
+    /// Uniquely-mapped reads landing on a gene's opposite strand.
+    pub frac_antisense: f64,
+}
+
+fn cellranger_summary(
+    total_reads: u64,
+    mapped_unique: u64,
+    region: RegionFunnel,
+) -> CellRangerSummary {
     let frac = |num: u64| -> f64 {
         if total_reads == 0 {
             0.0
@@ -1782,34 +2351,14 @@ fn write_cellranger_summary(
             num as f64 / total_reads as f64
         }
     };
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    let mut row = |k: &str, v: String| {
-        let _ = writeln!(out, "{k},{v}");
-    };
-    row("Number of Reads", total_reads.to_string());
-    row(
-        "Reads Mapped to Genome: Unique",
-        format!("{:.6}", frac(mapped_unique)),
-    );
-    row(
-        "Reads Mapped Confidently to Exonic Regions",
-        format!("{:.6}", frac(region.exonic)),
-    );
-    row(
-        "Reads Mapped Confidently to Intronic Regions",
-        format!("{:.6}", frac(region.intronic)),
-    );
-    row(
-        "Reads Mapped Confidently to Intergenic Regions",
-        format!("{:.6}", frac(region.intergenic)),
-    );
-    row(
-        "Reads Mapped Antisense to Gene",
-        format!("{:.6}", frac(region.antisense)),
-    );
-    std::fs::write(path, out).map_err(|e| Error::io(e, path))?;
-    Ok(())
+    CellRangerSummary {
+        n_reads: total_reads,
+        frac_mapped_genome_unique: frac(mapped_unique),
+        frac_exonic: frac(region.exonic),
+        frac_intronic: frac(region.intronic),
+        frac_intergenic: frac(region.intergenic),
+        frac_antisense: frac(region.antisense),
+    }
 }
 
 /// `features.tsv`: `gene_id <TAB> gene_name <TAB> "Gene Expression"` (CellRanger
@@ -1921,6 +2470,47 @@ mod tests {
         let empty: HashMap<u32, f64> = HashMap::default();
         let pu0 = distribute_multi(MultiMethod::PropUnique, &empty, &mols);
         assert!((pu0[&0] - 0.5).abs() < 1e-9 && (pu0[&1] - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn multi_matrices_csr() {
+        // 2 cells (cb 3, 7) × 3 genes. Cell 3: gene 0 = 4 unique. Cell 7: gene 2 = 1.
+        let unique = CsrMatrix::try_from_csr_data(2, 3, vec![0, 1, 2], vec![0, 2], vec![4u64, 1])
+            .expect("valid csr");
+        let stats: Vec<CellStat> = [3u32, 7]
+            .into_iter()
+            .map(|cb| CellStat {
+                cb,
+                n_reads: 1,
+                n_umis: 1,
+                n_genes: 1,
+            })
+            .collect();
+        // Cell 3: one ambiguous molecule (two records, same UMI) over {0,1}.
+        // Cell 9 has no unique row → skipped entirely.
+        let mk = |cb, umi, genes: &[u32]| crate::solo::MultiGeneRecord {
+            cb,
+            umi,
+            genes: genes.to_vec(),
+        };
+        let multi = vec![mk(3, 42, &[0, 1]), mk(3, 42, &[1]), mk(9, 1, &[2])];
+
+        let methods = [MultiMethod::Uniform, MultiMethod::PropUnique];
+        let out: Vec<_> = multi_matrices(&unique, &stats, &multi, &methods)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid matrices");
+        assert_eq!(out.len(), 2);
+
+        // Uniform: cell 3 gets +0.5 on genes 0 and 1; cell 7 unchanged.
+        let (m, uni) = &out[0];
+        assert_eq!(*m, MultiMethod::Uniform);
+        let t: Vec<_> = uni.triplet_iter().map(|(r, c, &v)| (r, c, v)).collect();
+        assert_eq!(t, vec![(0, 0, 4.5), (0, 1, 0.5), (1, 2, 1.0)]);
+
+        // PropUnique: all weight to gene 0 (gene 1 has no unique counts).
+        let (_, pu) = &out[1];
+        let t: Vec<_> = pu.triplet_iter().map(|(r, c, &v)| (r, c, v)).collect();
+        assert_eq!(t, vec![(0, 0, 5.0), (1, 2, 1.0)]);
     }
 
     #[test]
