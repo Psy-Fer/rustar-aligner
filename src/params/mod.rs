@@ -1133,14 +1133,15 @@ pub struct Parameters {
     #[arg(long = "soloOutGzip", default_value = "no")]
     pub solo_out_gzip: String,
 
-    /// Container format(s) for the solo count matrices (rustar extension beyond
+    /// Container format for the solo count matrices (rustar extension beyond
     /// STARsolo). `MTX` (default) is STARsolo's `raw/`+`filtered/` MatrixMarket
-    /// triplet. `Zarr` writes sharded Zarr v3 AnnData stores (`raw.zarr`,
-    /// `filtered.zarr`) and `H5AD` writes `raw.h5ad` / `filtered.h5ad`; both are
-    /// cells × genes (AnnData's obs × var orientation, the transpose of `.mtx`).
-    /// Values combine, e.g. `--soloOutputFormat MTX Zarr`.
-    #[arg(long = "soloOutputFormat", num_args = 1.., default_values_t = vec!["MTX".to_string()])]
-    pub solo_output_format: Vec<String>,
+    /// triplet. `Zarr` writes one sharded Zarr v3 MuData store,
+    /// `<soloOutFileNames[0]>/<matrix stem>.zarr`, holding every feature as a
+    /// layer of a `gex` modality plus a junction-indexed `sj` modality — cells ×
+    /// features (AnnData's obs × var orientation, the transpose of `.mtx`).
+    /// One format per run: the two writers each consume the count records.
+    #[arg(long = "soloOutputFormat", default_value = "MTX")]
+    pub solo_output_format: String,
 
     /// Velocyto ambiguous-molecule handling (rustar extension beyond STARsolo).
     /// `yes` (default) writes the three `spliced`/`unspliced`/`ambiguous` matrices
@@ -1651,27 +1652,24 @@ impl Parameters {
                     ));
                 }
             }
-            // soloOutputFormat values (and whether this build has the backend).
-            for f in &params.solo_output_format {
-                match crate::solo::adata::OutputFormat::parse(f) {
-                    Some(fmt) if fmt.is_available() => {}
-                    Some(fmt) => {
-                        return Err(command.error(
-                            ErrorKind::InvalidValue,
-                            format!(
-                                "--soloOutputFormat {f} needs the `{}` cargo feature, which this binary was built without",
-                                fmt.cargo_feature(),
-                            ),
-                        ));
-                    }
-                    None => {
-                        return Err(command.error(
-                            ErrorKind::InvalidValue,
-                            format!(
-                                "unsupported --soloOutputFormat '{f}'; expected MTX, Zarr, or H5AD"
-                            ),
-                        ));
-                    }
+            // soloOutputFormat value (and whether this build has the backend).
+            let f = &params.solo_output_format;
+            match crate::solo::OutputFormat::parse(f) {
+                Some(fmt) if fmt.is_available() => {}
+                Some(fmt) => {
+                    return Err(command.error(
+                        ErrorKind::InvalidValue,
+                        format!(
+                            "--soloOutputFormat {f} needs the `{}` cargo feature, which this binary was built without",
+                            fmt.cargo_feature(),
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(command.error(
+                        ErrorKind::InvalidValue,
+                        format!("unsupported --soloOutputFormat '{f}'; expected MTX or Zarr"),
+                    ));
                 }
             }
             // Gene-level features need a gene model (SJ does not — junctions come
