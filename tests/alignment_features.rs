@@ -1214,14 +1214,21 @@ fn test_starsolo_output_format_zarr() {
         )
         .unwrap();
         assert_eq!(g["attributes"]["encoding-type"], "anndata", "modality {m}");
-        for elem in ["X", "obs", "var"] {
+        for elem in ["obs", "var"] {
             assert!(
                 store.join(format!("mod/{m}/{elem}")).exists(),
                 "modality {m} is missing {elem}"
             );
         }
     }
-    for layer in ["GeneFull", "spliced", "unspliced", "ambiguous"] {
+    // No gene feature is privileged as X: every one of them is a named layer.
+    // (SJ has a single matrix, so it keeps X.)
+    assert!(
+        !store.join("mod/gex/X").exists(),
+        "gex must not have an X — the features are layers"
+    );
+    assert!(store.join("mod/sj/X").exists(), "sj is missing X");
+    for layer in ["Gene", "GeneFull", "spliced", "unspliced", "ambiguous"] {
         assert!(
             store.join(format!("mod/gex/layers/{layer}")).exists(),
             "missing gex layer {layer}"

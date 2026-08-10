@@ -9,9 +9,8 @@
 //! Solo.out/matrix.zarr/            encoding-type = MuData
 //!   uns/summary/<Feature>/…        the Summary.csv statistics, unformatted
 //!   mod/                           mod-order = [gex, sj]
-//!     gex/                         cells × genes
-//!       X                          the first --soloFeatures gene feature (Gene)
-//!       layers/GeneFull            further gene-indexed features
+//!     gex/                         cells × genes, no X
+//!       layers/{Gene,GeneFull}     one per --soloFeatures gene feature
 //!       layers/{spliced,unspliced,ambiguous}
 //!       layers/Gene_UniqueAndMult-EM …
 //!       obs (whitelist barcodes), var (gene_id + gene_name)
@@ -19,12 +18,14 @@
 //!     sj/                          cells × junctions (X only)
 //! ```
 //!
-//! Two things are deliberate. **`obs` is the full whitelist**, identical in every
+//! Three things are deliberate. **`obs` is the full whitelist**, identical in every
 //! matrix and both modalities — so the modalities can share one MuData `obs` and
 //! no cell-calling decision is baked into the axis. **Cell calling lives in each
 //! output type's `obsm` frame** as an `is_cell` column, rather than one
 //! `is_cell_<Feature>` column per feature sprayed across `obs`; the MTX writer's
-//! `filtered/` directory is that same boolean, materialized.
+//! `filtered/` directory is that same boolean, materialized. And **`gex` has no
+//! `X`**: no gene feature is privileged as *the* matrix, so every one of them is
+//! a named layer and the caller picks (`sj` has a single matrix, so it keeps `X`).
 //!
 //! Unlike the MatrixMarket writer, which streams each feature through a temp
 //! file, `set_layers` takes materialized arrays — so every layer is held in
@@ -183,8 +184,7 @@ mod zarr {
                     &funnel,
                     crate::solo::count::feature_reads(ctx, *feature),
                 );
-                // The feature's own counts lead, so the first feature's matrix
-                // becomes X below.
+                // The feature's own counts lead, ahead of its multimapper variants.
                 layers.insert(0, (name.clone(), matrix.into()));
                 Ok((
                     layers,
@@ -235,22 +235,19 @@ mod zarr {
                 path.display()
             );
         } else {
-            // X is the first --soloFeatures gene feature (Gene for a 10x run):
-            // the matrix most tools expect to find as the primary layer.
-            let (x_name, x) = layers.remove(0);
+            // All layers are output as-is with keys in Layers.
             let gex = AnnData::<Zarr>::new(path.join("mod").join("gex")).map_err(zarr_err)?;
             gex.set_var(gene_frame(&ctx.gene_ann.gene_names)?)
                 .map_err(zarr_err)?;
             gex.set_var_names(DataFrameIndex::from(ctx.gene_ann.gene_ids.clone()))
                 .map_err(zarr_err)?;
             gex.set_obs_names(obs_index.clone()).map_err(zarr_err)?;
-            gex.set_x(x).map_err(zarr_err)?;
             gex.set_layers(layers).map_err(zarr_err)?;
             gex.close().map_err(zarr_err)?;
             write_obsm_frames(&store, "gex", obsm, &obs_index)?;
             modalities.push("gex");
             log::info!(
-                "STARsolo: wrote {}/mod/gex ({n_obs} barcodes × {n_genes} genes, X = {x_name})",
+                "STARsolo: wrote {}/mod/gex ({n_obs} barcodes × {n_genes} genes)",
                 path.display(),
             );
         }
