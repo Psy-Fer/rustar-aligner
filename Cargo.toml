@@ -46,7 +46,8 @@ chrono = "0.4"
 tempfile = "3"
 bitflags = { version = "2.12.1", features = ["std"] }
 shlex = "2.0.1"
-caps-sa = "0.7"
+# Temporary Git pin until caps-sa 0.7.0 is published to crates.io.
+caps-sa = { version = "0.7", git = "https://github.com/COMBINE-lab/caps-sa.git", rev = "967a7b9a1ac505e6c3882b56604514cd59b7b22d" }
 # mimalloc as the global allocator. Two reasons:
 #   1. **Memory return**: glibc malloc creates one arena per worker
 #      thread (rayon spawns ~num_cpus workers + sub-threads) and
