@@ -638,12 +638,8 @@ fn dispatch_caps_sa_segmented(
         // bounded, partition-local geometric LCP memoization with its measured
         // defaults. The policy remains explicit here: caps-sa itself defaults
         // to the direct kernel for generic inputs.
-        let opts =
-            caps_sa_ext_mem_opts(temp_dir).lcp_memoization(
-                caps_sa::LcpMemoizationPolicy::Geometric(
-                    caps_sa::GeometricMemoizationConfig::default(),
-                ),
-            );
+        let opts = caps_sa_ext_mem_opts(temp_dir)
+            .lcp_memoization(caps_sa::LcpMemoizationPolicy::geometric());
         // Predicate accepts ACGT only (rejects N at 4, spacer at 5).
         // Borrows `original` via `&[u8]` — `Send + Sync` is satisfied.
         let original_ref: &[u8] = original;

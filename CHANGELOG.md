@@ -13,6 +13,14 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Other changes
 
+- Production genome indexing now enables caps-sa 0.7's bounded geometric LCP
+  memoization through its stable policy API. On the complete ruSTAR-shaped
+  GRCh38 plus GENCODE v50 fixture (6.56 billion symbols, 6.18 billion retained
+  suffixes, 1.40 million segments, 32 physical cores), the final caps-sa 0.7
+  implementation built the SA in 172.953 s versus 267.592 s for its original
+  0.7 baseline: 35.4% faster, with peak RSS reduced from 10,512,408 to
+  9,169,892 KiB. The complete output hash was unchanged.
+
 - `cluster_seeds` reuses its window-bin map across reads on a thread instead
   of rebuilding it per read. Merging two windows re-keys every bin in the
   merged span, so the per-read pre-sizing was only a floor and the map
