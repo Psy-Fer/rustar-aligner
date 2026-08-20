@@ -8,6 +8,7 @@
 /// Submodules:
 /// - `transcriptome` — transcript-level alignment projection for
 ///   `--quantMode TranscriptomeSAM` (Salmon / RSEM input).
+pub mod coverage;
 pub mod transcriptome;
 
 use std::io::Write as _;
