@@ -1248,6 +1248,49 @@ fn test_starsolo_output_format_zarr() {
         );
     }
     assert!(store.join("mod/sj/obsm/stats_SJ").exists());
+
+    // Every obsm frame is indexed by the barcodes — a polars DataFrame carries no
+    // index of its own, and Python AnnData rejects the frame if it does not match
+    // obs_names.
+    for (m, frame) in [
+        ("gex", "stats_Gene"),
+        ("gex", "stats_GeneFull"),
+        ("sj", "stats_SJ"),
+    ] {
+        let (obs, obsm) = obs_and_obsm_index(&store.join("mod").join(m), frame);
+        assert!(
+            obs.len() == 3 && obs[0] == cb,
+            "unexpected obs_names: {obs:?}"
+        );
+        assert_eq!(
+            obsm, obs,
+            "mod/{m}/obsm/{frame} is not indexed by obs_names"
+        );
+    }
+}
+
+/// `(obs_names, index of obsm/<key>)` of one modality, read back from disk.
+#[cfg(feature = "anndata-out")]
+fn obs_and_obsm_index(modality: &std::path::Path, key: &str) -> (Vec<String>, Vec<String>) {
+    use anndata::Backend;
+    use anndata::backend::{DataContainer, GroupOp};
+    use anndata::container::DataFrameElem;
+    use anndata_zarr::Zarr;
+
+    let index = |c| {
+        DataFrameElem::<Zarr>::try_from(c)
+            .unwrap()
+            .inner()
+            .index
+            .clone()
+            .into_vec()
+    };
+    let store = Zarr::open(modality).unwrap();
+    let obsm = store.open_group("obsm").unwrap();
+    (
+        index(DataContainer::open(&store, "obs").unwrap()),
+        index(DataContainer::open(&obsm, key).unwrap()),
+    )
 }
 
 // ---------------------------------------------------------------------------

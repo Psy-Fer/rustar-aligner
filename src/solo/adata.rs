@@ -79,9 +79,10 @@ mod zarr {
     };
     use crate::solo::whitelist::CbWhitelist;
     use anndata::backend::{AttributeOp, Value};
-    use anndata::container::InnerDataFrameElem;
     use anndata::data::{DataFrameIndex, Mapping};
-    use anndata::{AnnData, AnnDataOp, Backend, backend::GroupOp, data::ArrayData, data::Data};
+    use anndata::{
+        AnnData, AnnDataOp, AxisArraysOp, Backend, backend::GroupOp, data::ArrayData, data::Data,
+    };
     use anndata_zarr::Zarr;
     use polars::prelude::{Column, DataFrame};
     use rustc_hash::FxHashMap as HashMap;
@@ -243,8 +244,10 @@ mod zarr {
                 .map_err(zarr_err)?;
             gex.set_obs_names(obs_index.clone()).map_err(zarr_err)?;
             gex.set_layers(layers).map_err(zarr_err)?;
+            for (name, df) in obsm {
+                gex.obsm().add(&name, df).map_err(zarr_err)?;
+            }
             gex.close().map_err(zarr_err)?;
-            write_obsm_frames(&store, "gex", obsm, &obs_index)?;
             modalities.push("gex");
             log::info!(
                 "STARsolo: wrote {}/mod/gex ({n_obs} barcodes × {n_genes} genes)",
@@ -283,13 +286,10 @@ mod zarr {
                 .map_err(zarr_err)?;
             sj.set_obs_names(obs_index.clone()).map_err(zarr_err)?;
             sj.set_x(matrix).map_err(zarr_err)?;
+            sj.obsm()
+                .add("stats_SJ", stats_frame(&stats, &called, n_obs)?)
+                .map_err(zarr_err)?;
             sj.close().map_err(zarr_err)?;
-            write_obsm_frames(
-                &store,
-                "sj",
-                vec![("stats_SJ".to_string(), stats_frame(&stats, &called, n_obs)?)],
-                &obs_index,
-            )?;
             modalities.push("sj");
             log::info!(
                 "STARsolo: wrote {}/mod/sj ({n_obs} barcodes × {} junctions)",
@@ -357,29 +357,6 @@ mod zarr {
         group
             .new_json_attr("encoder-version", &Value::from(env!("CARGO_PKG_VERSION")))
             .map_err(zarr_err)
-    }
-
-    /// Write `obsm` DataFrames carrying the barcode index. `AnnData::set_obsm`
-    /// writes a bare DataFrame, which gets a 0..n range index — Python AnnData
-    /// then rejects the frame because its index does not match `obs_names`, so
-    /// the frames go in through `InnerDataFrameElem`, which writes both.
-    fn write_obsm_frames(
-        store: &<Zarr as Backend>::Store,
-        modality: &str,
-        frames: Vec<(String, DataFrame)>,
-        index: &DataFrameIndex,
-    ) -> Result<(), Error> {
-        if frames.is_empty() {
-            return Ok(());
-        }
-        let group = store
-            .open_group(&format!("mod/{modality}/obsm"))
-            .map_err(zarr_err)?;
-        for (name, df) in frames {
-            InnerDataFrameElem::<Zarr>::new(&group, &name, Some(index.clone()), &df)
-                .map_err(zarr_err)?;
-        }
-        Ok(())
     }
 
     /// The whitelist indices `--soloCellFilter` calls cells for this matrix —

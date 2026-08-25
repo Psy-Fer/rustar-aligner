@@ -54,8 +54,6 @@ dependencies = [
 [[package]]
 name = "anndata"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f551da3c4d1eba883f889e0d94ca56da2103538b9d3ab807a41feaac68ee6482"
 dependencies = [
  "anyhow",
  "flate2",
@@ -78,8 +76,6 @@ dependencies = [
 [[package]]
 name = "anndata-zarr"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "027f211ed5b2be6751515f525f57b3ca2e08946209f11555f1dcce742a506655"
 dependencies = [
  "anndata",
  "anyhow",
