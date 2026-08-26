@@ -873,12 +873,6 @@ pub struct Parameters {
     #[arg(long = "outFilterMismatchNoverLmax", default_value_t = 0.3)]
     pub out_filter_mismatch_nover_lmax: f64,
 
-    /// Max ratio of mismatches to *read* length (STAR's
-    /// `outFilterMismatchNoverReadLmax`). Applied to the full read length,
-    /// where `outFilterMismatchNoverLmax` is applied to the mapped length.
-    #[arg(long = "outFilterMismatchNoverReadLmax", default_value_t = 1.0)]
-    pub out_filter_mismatch_nover_read_lmax: f64,
-
     /// Min alignment score (absolute)
     #[arg(long = "outFilterScoreMin", default_value_t = 0)]
     pub out_filter_score_min: i32,
@@ -954,18 +948,6 @@ pub struct Parameters {
     /// `Extend5pOfReads12`, or `Extend3pOfRead1`.
     #[arg(long = "alignEndsType", default_value = "Local")]
     pub align_ends_type: String,
-
-    /// Max number of alignments kept for one read before the score filters
-    /// run (STAR's `alignTranscriptsPerReadNmax`). A read that produces more
-    /// keeps only the highest-scoring `N`.
-    #[arg(long = "alignTranscriptsPerReadNmax", default_value_t = 10000)]
-    pub align_transcripts_per_read_nmax: usize,
-
-    /// `Yes` (default) allows an alignment to soft-clip past the end of a
-    /// chromosome; `No` prohibits it, which is what Cufflinks-compatible
-    /// output needs.
-    #[arg(long = "alignSoftClipAtReferenceEnds", default_value = "Yes")]
-    pub align_soft_clip_at_reference_ends: String,
 
     /// Min overlap (bases) between mates required to trigger merge-and-realign; 0 = off
     #[arg(long = "peOverlapNbasesMin", default_value_t = 0)]
@@ -1867,35 +1849,6 @@ impl Parameters {
                     "the --outWigType 2nd word (read1_5p / read2) is not implemented; omit it",
                 ));
             }
-        }
-
-        // alignSoftClipAtReferenceEnds is Yes/No; anything else would be
-        // silently read as Yes.
-        if !["Yes", "No"]
-            .iter()
-            .any(|v| v.eq_ignore_ascii_case(&params.align_soft_clip_at_reference_ends))
-        {
-            return Err(command.error(
-                ErrorKind::InvalidValue,
-                format!(
-                    "unsupported --alignSoftClipAtReferenceEnds '{}'; expected Yes or No",
-                    params.align_soft_clip_at_reference_ends
-                ),
-            ));
-        }
-
-        if params.align_transcripts_per_read_nmax == 0 {
-            return Err(command.error(
-                ErrorKind::InvalidValue,
-                "--alignTranscriptsPerReadNmax must be > 0",
-            ));
-        }
-
-        if params.out_filter_mismatch_nover_read_lmax < 0.0 {
-            return Err(command.error(
-                ErrorKind::InvalidValue,
-                "--outFilterMismatchNoverReadLmax must be >= 0",
-            ));
         }
 
         // quantMode GeneCounts requires a GTF file

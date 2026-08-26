@@ -84,12 +84,16 @@ const ACCEPTED_BUT_INERT: &[(&str, &str)] = &[
 /// Adding a name here must always be a deliberate act. Removing one is what
 /// progress looks like.
 const NOT_YET_ACCEPTED: &[&str] = &[
-    // Aligner core (annotated-junction stitching, alignEndsType, in-recursion
-    // length penalty).
+    // Aligner core; implemented by the aligner-core PR, not here.
     "alignEndsProtrude",
     "alignInsertionFlush",
+    "alignSoftClipAtReferenceEnds",
+    "alignTranscriptsPerReadNmax",
+    "outFilterMismatchNoverReadLmax",
     "seedNoneLociPerWindow",
     "seedSplitMin",
+    // Aligner core (annotated-junction stitching, alignEndsType, in-recursion
+    // length penalty).
     // Long reads.
     "winReadCoverageBasesMin",
     // Chimeric multimapping.

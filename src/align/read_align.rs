@@ -132,27 +132,6 @@ pub enum PairedAlignmentResult {
     },
 }
 
-/// Whether `t`'s soft-clipped ends would extend past the boundaries of its
-/// chromosome: whether the clipped bases have nowhere to sit on the reference.
-/// This is what `--alignSoftClipAtReferenceEnds No` prohibits.
-fn clips_past_reference_end(t: &Transcript, index: &GenomeIndex, read_len: usize) -> bool {
-    let Some(first) = t.exons.first() else {
-        return false;
-    };
-    let Some(last) = t.exons.last() else {
-        return false;
-    };
-    let chr_start = index.genome.chr_start[t.chr_idx];
-    let chr_end = chr_start + index.genome.chr_length[t.chr_idx];
-
-    // Bases clipped before the first aligned base, and after the last one.
-    let left_clip = first.read_start as u64;
-    let right_clip = (read_len - last.read_end) as u64;
-
-    first.genome_start < chr_start.saturating_add(left_clip) && left_clip > 0
-        || last.genome_end.saturating_add(right_clip) > chr_end && right_clip > 0
-}
-
 /// Align a read to the genome.
 ///
 /// # Algorithm
@@ -413,19 +392,6 @@ pub fn align_read(
         );
     }
 
-    // Hard cap on how many alignments one read may carry into the filters
-    // (STAR's alignTranscriptsPerReadNmax). Transcripts are already ordered
-    // best-score-first, so the cap keeps the best ones.
-    if transcripts.len() > params.align_transcripts_per_read_nmax {
-        log::debug!(
-            "Read {}: {} alignments capped to alignTranscriptsPerReadNmax={}",
-            read_name,
-            transcripts.len(),
-            params.align_transcripts_per_read_nmax
-        );
-        transcripts.truncate(params.align_transcripts_per_read_nmax);
-    }
-
     // Score-range filter: keep only alignments within outFilterMultimapScoreRange of the best.
     // (STAR's multMapSelect step — must run before quality filters.)
     if !transcripts.is_empty() {
@@ -444,21 +410,7 @@ pub fn align_read(
     let pre_filter_count = transcripts.len();
     let mut filter_reasons = std::collections::HashMap::new();
 
-    let prohibit_ref_end_clip = params
-        .align_soft_clip_at_reference_ends
-        .eq_ignore_ascii_case("No");
-
     transcripts.retain(|t| {
-        // A soft clip that would hang past the start or the end of the
-        // chromosome (STAR's alignSoftClipAtReferenceEnds No, needed for
-        // Cufflinks-compatible output).
-        if prohibit_ref_end_clip && clips_past_reference_end(t, index, read_seq.len()) {
-            *filter_reasons
-                .entry("soft_clip_at_reference_end")
-                .or_insert(0) += 1;
-            return false;
-        }
-
         // Absolute score threshold
         if t.score < params.out_filter_score_min {
             *filter_reasons.entry("score_min").or_insert(0) += 1;
@@ -481,25 +433,6 @@ pub fn align_read(
                 params.out_filter_mismatch_nmax,
                 read_length,
                 t.score
-            );
-            return false;
-        }
-
-        // Mismatch count over the *read* length (STAR's
-        // outFilterMismatchNoverReadLmax). STAR takes
-        // outFilterMismatchNoverLmax over the *mapped* length instead; the
-        // check above still divides by the read length, so the two behave
-        // identically here until issue #238 is fixed.
-        let read_mismatch_rate = t.n_mismatch as f64 / read_length;
-        if read_mismatch_rate > params.out_filter_mismatch_nover_read_lmax {
-            *filter_reasons.entry("mismatch_rate_read").or_insert(0) += 1;
-            log::debug!(
-                "Filtered {}: {:.1}% read-length mismatch rate > {:.1}% max ({}/{} bases)",
-                read_name,
-                read_mismatch_rate * 100.0,
-                params.out_filter_mismatch_nover_read_lmax * 100.0,
-                t.n_mismatch,
-                read_length
             );
             return false;
         }
@@ -1542,8 +1475,6 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
         if combined_nm > params.out_filter_mismatch_nmax
             || (combined_nm as f64)
                 > params.out_filter_mismatch_nover_lmax * (mate1_len + mate2_len)
-            || (combined_nm as f64)
-                > params.out_filter_mismatch_nover_read_lmax * (mate1_len + mate2_len)
         {
             paired_alns.clear();
             return;
