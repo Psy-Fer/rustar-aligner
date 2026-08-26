@@ -91,15 +91,6 @@ const NOT_YET_ACCEPTED: &[&str] = &[
     "parametersFiles",
     "sysShell",
     "versionGenome",
-    // Aligner core (annotated-junction stitching, alignEndsType, in-recursion
-    // length penalty).
-    "alignEndsProtrude",
-    "alignInsertionFlush",
-    "alignSoftClipAtReferenceEnds",
-    "alignTranscriptsPerReadNmax",
-    "outFilterMismatchNoverReadLmax",
-    "seedNoneLociPerWindow",
-    "seedSplitMin",
     // Long reads.
     "winReadCoverageBasesMin",
     // Chimeric multimapping.
