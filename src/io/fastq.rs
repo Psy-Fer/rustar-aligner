@@ -72,6 +72,19 @@ pub struct PairedRead {
 /// FASTQ reader that handles decompression and base encoding
 pub struct FastqReader {
     inner: fastq::io::Reader<Box<dyn BufRead + Send>>,
+    /// Signed shift applied to every input quality byte so the rest of the
+    /// pipeline always sees Phred+33.
+    ///
+    /// `--readQualityScoreBase 64` contributes `-31`, converting Solexa/Illumina
+    /// 1.3 input. `--outQSconversionAdd` contributes its own value, which STAR
+    /// documents as an output conversion; applying it here rather than at the
+    /// writer means it also reaches anything else that reads qualities. That is
+    /// only observable when both it and STARsolo are in use, which STAR itself
+    /// does not support either.
+    qual_shift: i32,
+    /// Characters that terminate a read name (`--readNameSeparator`). Empty
+    /// means keep the whole name.
+    name_separators: Vec<u8>,
 }
 
 impl FastqReader {
@@ -115,7 +128,28 @@ impl FastqReader {
 
         Ok(Self {
             inner: fastq_reader,
+            qual_shift: 0,
+            name_separators: vec![b'/'],
         })
+    }
+
+    /// Apply the read-input knobs: `--readQualityScoreBase`,
+    /// `--outQSconversionAdd` and `--readNameSeparator`.
+    #[must_use]
+    pub fn with_params(mut self, params: &crate::params::Parameters) -> Self {
+        let base = if params.read_quality_score_base == 0 {
+            33
+        } else {
+            params.read_quality_score_base
+        };
+        self.qual_shift = (33 - base) + params.out_qs_conversion_add;
+        self.name_separators = params
+            .read_name_separator
+            .iter()
+            .filter(|s| s.as_str() != "-")
+            .filter_map(|s| s.as_bytes().first().copied())
+            .collect();
+        self
     }
 
     /// Open FASTQ file using external decompression command
@@ -150,7 +184,25 @@ impl FastqReader {
 
                 let sequence = record.sequence().iter().map(|&b| encode_base(b)).collect();
 
-                let quality = record.quality_scores().to_vec();
+                let name = match self
+                    .name_separators
+                    .iter()
+                    .filter_map(|&sep| name.as_bytes().iter().position(|&b| b == sep))
+                    .min()
+                {
+                    Some(cut) => name[..cut].to_string(),
+                    None => name,
+                };
+
+                let quality = if self.qual_shift == 0 {
+                    record.quality_scores().to_vec()
+                } else {
+                    record
+                        .quality_scores()
+                        .iter()
+                        .map(|&b| (b as i32 + self.qual_shift).clamp(33, 126) as u8)
+                        .collect()
+                };
 
                 Ok(Some(EncodedRead {
                     name,
@@ -203,6 +255,15 @@ impl PairedFastqReader {
         let reader2 = FastqReader::open(path2, decompress_cmd)?;
 
         Ok(Self { reader1, reader2 })
+    }
+
+    /// Apply the read-input knobs to both mates. See
+    /// [`FastqReader::with_params`].
+    #[must_use]
+    pub fn with_params(mut self, params: &crate::params::Parameters) -> Self {
+        self.reader1 = self.reader1.with_params(params);
+        self.reader2 = self.reader2.with_params(params);
+        self
     }
 
     /// Get next paired read with name validation
@@ -565,9 +626,11 @@ mod tests {
 
         let pair1 = reader.next_paired().unwrap().unwrap();
         assert_eq!(pair1.name, "read1");
-        assert_eq!(pair1.mate1.name, "read1/1");
+        // Read names are cut at `/`, STAR's default --readNameSeparator, so
+        // both mates report the shared name rather than the /1 and /2 forms.
+        assert_eq!(pair1.mate1.name, "read1");
         assert_eq!(pair1.mate1.sequence, vec![0, 1, 2, 3]); // ACGT
-        assert_eq!(pair1.mate2.name, "read1/2");
+        assert_eq!(pair1.mate2.name, "read1");
         assert_eq!(pair1.mate2.sequence, vec![2, 2, 1, 1]); // GGCC
 
         let pair2 = reader.next_paired().unwrap().unwrap();

@@ -48,6 +48,12 @@ pub(crate) struct SjCounts {
 pub struct SpliceJunctionStats {
     /// Thread-safe map for parallel accumulation
     junctions: DashMap<SjKey, SjCounts>,
+    /// `--outSJfilterReads Unique`: drop junctions from multi-mapping reads at
+    /// record time rather than discounting them at output time. STAR gates the
+    /// recording itself (`ReadAlign::recordSJ`: the whole read is skipped
+    /// unless `outSJfilterReads=="All" || nTrO==1`), so a multimapper
+    /// contributes nothing at all — not its counts, and not its overhang.
+    unique_reads_only: bool,
 }
 
 impl Clone for SpliceJunctionStats {
@@ -66,7 +72,10 @@ impl Clone for SpliceJunctionStats {
                 },
             );
         }
-        Self { junctions: new_map }
+        Self {
+            junctions: new_map,
+            unique_reads_only: self.unique_reads_only,
+        }
     }
 }
 
@@ -75,6 +84,15 @@ impl SpliceJunctionStats {
     pub fn new() -> Self {
         Self {
             junctions: DashMap::new(),
+            unique_reads_only: false,
+        }
+    }
+
+    /// [`Self::new`] honouring `--outSJfilterReads`.
+    pub fn with_params(params: &Parameters) -> Self {
+        Self {
+            junctions: DashMap::new(),
+            unique_reads_only: params.out_sj_filter_reads == "Unique",
         }
     }
 
@@ -101,6 +119,10 @@ impl SpliceJunctionStats {
         overhang: u32,
         annotated: bool,
     ) {
+        if self.unique_reads_only && !is_unique {
+            return; // STAR records nothing for this read under `Unique`.
+        }
+
         let key = SjKey {
             chr_idx,
             intron_start: start,
@@ -132,11 +154,12 @@ impl SpliceJunctionStats {
             .map(|entry| {
                 let key = entry.key().clone();
                 let counts = entry.value();
+                let multi = counts.multi_count.load(Ordering::Relaxed);
                 (
                     key,
                     counts.annotated,
                     counts.unique_count.load(Ordering::Relaxed),
-                    counts.multi_count.load(Ordering::Relaxed),
+                    multi,
                     counts.max_overhang.load(Ordering::Relaxed),
                 )
             })
@@ -281,11 +304,12 @@ impl SpliceJunctionStats {
             .map(|entry| {
                 let key = entry.key().clone();
                 let counts = entry.value();
+                let multi = counts.multi_count.load(Ordering::Relaxed);
                 (
                     key,
                     counts.annotated,
                     counts.unique_count.load(Ordering::Relaxed),
-                    counts.multi_count.load(Ordering::Relaxed),
+                    multi,
                     counts.max_overhang.load(Ordering::Relaxed),
                 )
             })

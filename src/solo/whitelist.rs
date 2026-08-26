@@ -406,6 +406,20 @@ impl CbWhitelist {
         }
     }
 
+    /// The whitelist position of an ASCII barcode, or `None` if it is not on
+    /// the list. Used for files that name barcodes as text — the cluster
+    /// assignment for `--soloFeatures Transcript3p`.
+    pub fn index_of_barcode(&self, ascii: &[u8]) -> Option<u32> {
+        let codes: Vec<u8> = ascii
+            .iter()
+            .map(|&b| crate::io::fastq::encode_base(b))
+            .collect();
+        match pack_barcode(&codes) {
+            PackResult::NoN(packed) => self.search(packed),
+            _ => None,
+        }
+    }
+
     /// Increment the exact-match count for sorted whitelist index `idx`.
     fn bump_exact(&self, idx: u32) {
         if let Self::List { exact_counts, .. } = self {

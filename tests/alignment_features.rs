@@ -2155,3 +2155,12 @@ fn test_starsolo_cr4_tso_clip_is_per_read_within_batch() {
     assert_eq!(n_tso, n_pairs, "every TSO read should be reported");
     assert_eq!(n_bare, n_pairs, "every TSO-free read should be reported");
 }
+
+// ---------------------------------------------------------------------------
+// Test — CellRanger4 TSO clip is applied per read within a batch
+//
+// The 5' TSO clip is resolved for a whole read batch in one hyalite
+// `Database::scan_all` pass (`solo::tso_clip_lens_cr4_batch`), then indexed back
+// out per read in the parallel align loop. This test interleaves TSO-bearing and
+// TSO-free reads so that any off-by-one or reordering between the batched scan
+// and the per-read loop lands a clip on the wrong read and fails here.

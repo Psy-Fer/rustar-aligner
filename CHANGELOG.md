@@ -11,6 +11,14 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ## [Unreleased]
 
+### Other changes
+
+- `cluster_seeds` reuses its window-bin map across reads on a thread instead
+  of rebuilding it per read. Merging two windows re-keys every bin in the
+  merged span, so the per-read pre-sizing was only a floor and the map
+  rehashed; profiling a human 10x run put that rehash at 2.1% of on-CPU time.
+  Output-neutral, verified by an empty diff on 20 M read pairs.
+
 ### Features
 
 - **`--clipAdapterType CellRanger4` now matches STAR exactly**, both halves of the
@@ -49,6 +57,29 @@ Sections commonly used: Features, Bug fixes, Other changes.
   `--clip3pNbases` misplaces most reads by `clip5pNbases`. That is a pre-existing
   bug, not introduced here, and is tracked separately; `CellRanger4` on its own
   and the fixed clips on their own are both unaffected.
+- **CLI and output parity: SAM/SJ/read-input knobs and the STAR limit
+  surface** — 30 further STAR 2.7.11b parameters. (`--outSAMorder` came from #145.)
+
+  - Implemented: `--outSAMmode` (`Full`/`NoQS`/`None`), `--outSJtype None`,
+    `--outSJfilterReads Unique`, `--outSAMheaderHD`, `--outSAMheaderPG`,
+    `--outSAMheaderCommentFile`, `--readFilesPrefix`, `--readNameSeparator`,
+    `--readQualityScoreBase`, `--outQSconversionAdd`.
+  - Refused loudly rather than accepted and ignored:
+    `--outSAMfilter KeepOnlyAddedReferences` / `KeepAllAddedReferences` and
+    `--readFilesType SAM`, both of which need machinery this aligner does not
+    have.
+  - Accepted and documented as output-neutral: the `--limit*` family,
+    `--outTmpDir`, `--outTmpKeep`, `--runDirPerm`, `--genomeFileSizes`,
+    `--outBAMsorting*`, `--readMatesLengthsIn`.
+
+  `tests/parameter_surface.rs` now checks every STAR 2.7.11b parameter name
+  against the CLI, so the coverage figure is machine-checked and surface drift
+  fails a test.
+
+### Bug fixes
+
+- Read names are cut at `--readNameSeparator` (default `/`), as STAR does. A
+  read named `foo/1` was previously emitted as `foo/1` where STAR emits `foo`.
 
 - **STARsolo single-cell quantification (`--soloType`)** — the 10x
   Chromium / plate-based count-matrix pipeline, ported from STAR and
@@ -134,7 +165,63 @@ Sections commonly used: Features, Bug fixes, Other changes.
   glibc's malloc and per-thread heaps that return whole segments to
   the OS when abandoned, so allocator cache size stays bounded.
 
+- **`--soloCellReadStats CB`** writes `Solo.out/<feature>/CellReads.stats`:
+  one row per cell barcode with fifteen counters describing what
+  happened to its reads — barcode match quality, unique or multi
+  genomic mapping, feature assignment, exonic/intronic and their
+  antisense counterparts, mitochondrial, and whether the read reached
+  the matrix — plus the per-cell UMI and gene totals. Reads whose
+  barcode never resolved are summed into a `CBnotInPasslist` row rather
+  than dropped, so the columns account for the whole input.
+  `--genomeChrSetMitochondrial` names the chromosomes behind the `mito`
+  column.
+- **`--runMode soloCellFiltering <raw dir> <output prefix>`** cell-calls
+  an existing raw count matrix without aligning anything. Cell calling
+  is a decision about a matrix, not about reads: re-calling with
+  different `--soloCellFilter` parameters should not mean re-aligning,
+  and a matrix produced elsewhere should be callable too. It streams
+  the matrix into the same form the align path produces, so the filters
+  are the identical code rather than a second implementation.
+- **`--soloCellFilter EmptyDrops_CR` now uses CellRanger's actual
+  statistics.** The ambient profile is smoothed with Simple Good-Turing,
+  as CellRanger and STAR do, instead of an approximation that reserved
+  unseen mass from the singleton rate and spread the remainder in
+  proportion to raw counts. The Monte-Carlo null is drawn with libc++'s
+  `std::mt19937` and `std::discrete_distribution`, seeded
+  `19760110 * (isim + 1)` per simulation as STAR seeds it, replacing a
+  SplitMix64 stream that could not agree with STAR's over an arbitrary
+  number of draws. Cell calls move as a result.
+
+- **`--soloFeatures Transcript3p`** quantifies transcripts rather than
+  genes, using how far each read's 3' end sits from each transcript's.
+  In a 3'-biased assay that distance discriminates between isoforms: a
+  read 200 bases from the end of one and 4000 from the end of another
+  is evidence for the first. The distance distribution is estimated
+  from the data, then used as the likelihood in an EM over UMIs. Output
+  is per *cluster* rather than per cell — `--soloClusterCBfile` (new,
+  and required for this feature) says which cell is in which cluster,
+  because one cell has too few UMIs to resolve isoforms. Reads sharing
+  a UMI contribute the intersection of their transcript sets, not the
+  union: they came from one molecule. Writes `matrix.mtx`,
+  `features.tsv` and `transcriptEndDistanceDistribution.txt` under
+  `Solo.out/Transcript3p/raw/`.
+
 ### Bug fixes
+
+- `--runThreadN 1` ran on every logical core instead of on one. The
+  rayon pool was configured only above 1, and skipping it leaves rayon's
+  default of one worker per core. Output is unchanged; the run now uses
+  the thread count asked for.
+- `--soloUMIfiltering MultiGeneUMI_CR` kept every gene tied at the
+  highest read count; CellRanger gives a tied UMI to no gene at all.
+  Since one read per gene is the ordinary shape of a multi-gene UMI, the
+  flag removed nothing in practice. On a 20k-read 10x fixture the count
+  matrix moves from 16 465 to 15 414 against STAR's 15 423.
+- `--soloUMIfiltering MultiGeneUMI_All` was aliased to `MultiGeneUMI`,
+  which is neither STAR's behaviour nor the documented one: in STAR
+  2.7.11b the variant is a no-op. It now removes a UMI seen in two or
+  more genes from **all** of them, the behaviour the option name
+  describes. Recorded in `DIVERGENCE.md` (closes #144).
 
 - **STARsolo `Gene` assignment now requires exon concordance**, matching
   STARsolo: a read counts toward a gene only when every aligned block
@@ -166,5 +253,17 @@ Sections commonly used: Features, Bug fixes, Other changes.
   run-mode dispatcher. The in-memory `GenomeIndex::build` +
   `GenomeIndex::write` flow remains for tests and any caller that
   needs random access to the SA in RAM.
+
+- Removed `Transcript::read_seq`, a public field that was filled with a
+  copy of the read at every finalised alignment and never read. **API
+  removal.** Output is unchanged.
+
+- The splice-motif check in the junction scan carries a sliding window
+  and looks the motif up in a table, instead of re-reading four genome
+  bases and matching on them at every position. Consecutive junction
+  positions share two of the four bases, so the scan does two genome
+  reads per position rather than four. Output is unchanged (SAM
+  byte-identical on 200k reads); about 2.8% off the wall clock on a
+  2M-read run, measured with `test/bench_ab.sh`.
 
 Initial release of Rust rewrite of STAR.

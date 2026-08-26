@@ -1090,7 +1090,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0u8; read_len],
         }
     }
 
@@ -1210,7 +1209,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![],
         };
         assert!(transcript_to_segment(&t).is_err());
     }
@@ -1354,7 +1352,6 @@ mod tests {
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0u8; read_len],
         }
     }
 
