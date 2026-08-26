@@ -1,12 +1,13 @@
 version: 2
 updates:
-  # Rust crates. Minor and patch bumps arrive as one grouped PR per week;
-  # major bumps stay separate because they need a real review.
+  # Rust crates. Minor and patch bumps arrive as one grouped PR per month;
+  # major bumps stay separate because they need a real review, and queue
+  # behind it (one open version-update PR per ecosystem at a time).
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 1
     commit-message:
       prefix: "chore(deps)"
     groups:
@@ -21,8 +22,8 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 1
     commit-message:
       prefix: "chore(ci)"
     groups:
@@ -37,8 +38,8 @@ updates:
   - package-ecosystem: "npm"
     directory: "/docs"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 1
     commit-message:
       prefix: "chore(docs)"
     groups:
@@ -54,7 +55,7 @@ updates:
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 3
+      interval: "monthly"
+    open-pull-requests-limit: 1
     commit-message:
       prefix: "chore(docker)"
