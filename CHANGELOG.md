@@ -42,6 +42,12 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Bug fixes
 
+- `--soloBarcodeMate 1` no longer runs without clipping. The flag says the
+  barcode lives inside mate 1, and nothing else says how many bases that is,
+  so STAR refuses the run unless the mate is clipped
+  (`ParametersSolo.cpp:145-150`). Without the check the CB+UMI prefix was
+  aligned as if it were cDNA (28 bases of it for 10x v3) and the run reported
+  nothing. Closes #227.
 - Read names are cut at `--readNameSeparator` (default `/`), as STAR does. A
   read named `foo/1` was previously emitted as `foo/1` where STAR emits `foo`.
 
