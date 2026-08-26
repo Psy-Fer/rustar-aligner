@@ -288,8 +288,10 @@ impl CoverageFile {
         let mut raw = vec![0u8; total_len * 4];
         r.read_exact(&mut raw).map_err(io)?;
         let cov: Vec<u32> = raw
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect();
 
         let mut offsets = Vec::with_capacity(n_genes + 1);
