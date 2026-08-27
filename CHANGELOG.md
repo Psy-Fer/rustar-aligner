@@ -50,6 +50,13 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Bug fixes
 
+- `--outFilterMismatchNoverLmax` is taken over the *mapped* length, as STAR
+  takes it (`trBest->rLength` in `ReadAlign_mappedFilter.cpp`), rather than
+  over the read length. The two agree on a fully aligned read and diverge on a
+  soft-clipped one, in the permissive direction: a 50-base alignment carrying
+  16 mismatches read as 0.16 rather than 0.32, so it passed the 0.3 default
+  that STAR applies to reject it. Output-neutral on the nf-core/rnaseq test
+  data, where the absolute `--outFilterMismatchNmax` cap dominates. Closes #238.
 - Read names are cut at `--readNameSeparator` (default `/`), as STAR does. A
   read named `foo/1` was previously emitted as `foo/1` where STAR emits `foo`.
 
