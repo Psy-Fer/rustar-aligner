@@ -1,0 +1,111 @@
+name: Benchmarks
+
+# Benchmarks are opt-in for the same reason the large-dataset job is: they are
+# long, and a number measured on a noisy shared runner is worse than no number.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label (e.g. ubuntu-latest, or a scverse AWS runner group)"
+        required: false
+        default: "ubuntu-latest"
+      baseline:
+        description: "Git ref to compare against (empty = no comparison)"
+        required: false
+        default: "main"
+  pull_request:
+    types: [labeled, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  micro:
+    name: Micro-benchmarks (divan)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark')
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # ratchet:dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # ratchet:Swatinem/rust-cache@v2.9.1
+
+      - name: Benchmark this ref
+        run: cargo bench --bench hot_paths | tee "${RUNNER_TEMP}/bench-head.txt"
+
+      - name: Benchmark the baseline
+        if: ${{ github.event.inputs.baseline != '' }}
+        run: |
+          set -eu
+          base="${{ github.event.inputs.baseline || 'main' }}"
+          git worktree add "${RUNNER_TEMP}/baseline" "origin/${base}"
+          cd "${RUNNER_TEMP}/baseline"
+          # A baseline older than the harness has no benches to run; say so
+          # rather than failing the job.
+          if [ -f benches/hot_paths.rs ]; then
+            cargo bench --bench hot_paths | tee "${RUNNER_TEMP}/bench-base.txt"
+          else
+            echo "baseline ${base} predates benches/hot_paths.rs; nothing to compare" \
+              | tee "${RUNNER_TEMP}/bench-base.txt"
+          fi
+
+      - name: Summarise
+        if: always()
+        run: python3 test/bench_report.py "${RUNNER_TEMP}/bench-head.txt" "${RUNNER_TEMP}/bench-base.txt" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload raw output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4.6.2
+        with:
+          name: benchmark-output
+          path: ${{ runner.temp }}/bench-*.txt
+          if-no-files-found: warn
+
+  end-to-end:
+    name: End-to-end wall time against STAR
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark')
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # ratchet:dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # ratchet:Swatinem/rust-cache@v2.9.1
+
+      - run: cargo build --release
+
+      - name: Install STAR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rna-star
+
+      - name: Time both aligners
+        run: >-
+          python3 test/speed_bench.py
+          --rustar ./target/release/rustar-aligner
+          --work "${RUNNER_TEMP}/speed"
+          --json "${RUNNER_TEMP}/speed.json"
+          >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4.6.2
+        with:
+          name: speed-metrics
+          path: ${{ runner.temp }}/speed.json
+          if-no-files-found: warn
