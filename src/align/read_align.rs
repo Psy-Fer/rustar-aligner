@@ -132,6 +132,30 @@ pub enum PairedAlignmentResult {
     },
 }
 
+/// Bases of the read that `t` actually aligns, summed over its exons.
+fn mapped_read_length(t: &Transcript) -> usize {
+    t.exons
+        .iter()
+        .map(|e| e.read_end.saturating_sub(e.read_start))
+        .sum()
+}
+
+/// Mismatches per aligned base, the ratio `--outFilterMismatchNoverLmax` caps.
+///
+/// STAR divides by the transcript's mapped length (`trBest->rLength` in
+/// `ReadAlign_mappedFilter.cpp`), not by the read length. The distinction only
+/// shows up on a soft-clipped alignment, and it matters in the permissive
+/// direction: dividing by the read length made the filter looser the more of
+/// the read had been clipped away, so a 50-base alignment carrying 16
+/// mismatches read as 0.16 rather than as 0.32 (#238).
+///
+/// `--outFilterMismatchNoverReadLmax` is the parameter that *is* taken over the
+/// read length, and it keeps its own denominator.
+fn mismatch_rate_over_mapped(t: &Transcript) -> f64 {
+    let mapped = mapped_read_length(t).max(1);
+    f64::from(t.n_mismatch) / (mapped as f64)
+}
+
 /// Align a read to the genome.
 ///
 /// # Algorithm
@@ -437,8 +461,13 @@ pub fn align_read(
             return false;
         }
 
-        // Relative mismatch count (mismatches / read_length)
-        let mismatch_rate = t.n_mismatch as f64 / read_length;
+        // Relative mismatch count. STAR divides by the *mapped* length
+        // (`trBest->rLength` in `ReadAlign_mappedFilter.cpp`), not by the read
+        // length: a soft-clipped alignment is judged on the part that actually
+        // aligned. Dividing by the read length made the filter more permissive
+        // the more of the read was clipped away (#238).
+        let mapped_length = mapped_read_length(t);
+        let mismatch_rate = mismatch_rate_over_mapped(t);
         if mismatch_rate > params.out_filter_mismatch_nover_lmax {
             *filter_reasons.entry("mismatch_rate").or_insert(0) += 1;
             log::debug!(
@@ -447,7 +476,7 @@ pub fn align_read(
                 mismatch_rate * 100.0,
                 params.out_filter_mismatch_nover_lmax * 100.0,
                 t.n_mismatch,
-                read_length,
+                mapped_length,
                 t.score
             );
             return false;
@@ -1550,6 +1579,78 @@ pub(crate) fn pe_junctions_consistent(left: &Transcript, right: &Transcript) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// STAR's denominator is the mapped length, so a soft-clipped alignment is
+    /// judged on what aligned. The read-length denominator was looser exactly
+    /// where the alignment was weakest (#238).
+    #[test]
+    fn mismatch_rate_is_taken_over_the_mapped_length() {
+        // 100-base read, 50 bases aligned, 16 mismatches.
+        let mut t = make_transcript_for_rate(0, 1_000, 1_050, 0, 50);
+        t.n_mismatch = 16;
+
+        assert_eq!(mapped_read_length(&t), 50);
+        assert!((mismatch_rate_over_mapped(&t) - 0.32).abs() < 1e-9);
+
+        // Over the full read the same alignment would read 0.16, which is
+        // under the 0.3 default and so would have been kept.
+        let read_length = 100.0;
+        assert!((f64::from(t.n_mismatch) / read_length - 0.16).abs() < 1e-9);
+    }
+
+    /// Two exons: the mapped length is their sum, not the genomic span.
+    #[test]
+    fn mapped_length_sums_exons_and_ignores_the_intron() {
+        let mut t = make_transcript_for_rate(0, 1_000, 5_060, 0, 30);
+        t.exons.push(crate::align::transcript::Exon {
+            genome_start: 5_000,
+            genome_end: 5_060,
+            read_start: 30,
+            read_end: 90,
+            i_frag: 0,
+        });
+        t.n_mismatch = 9;
+        assert_eq!(mapped_read_length(&t), 90);
+        assert!((mismatch_rate_over_mapped(&t) - 0.1).abs() < 1e-9);
+    }
+
+    /// A transcript with no exons cannot divide by zero.
+    #[test]
+    fn mismatch_rate_of_an_empty_transcript_is_finite() {
+        let mut t = make_transcript_for_rate(0, 0, 0, 0, 0);
+        t.exons.clear();
+        t.n_mismatch = 3;
+        assert!(mismatch_rate_over_mapped(&t).is_finite());
+    }
+
+    fn make_transcript_for_rate(
+        chr_idx: usize,
+        genome_start: u64,
+        genome_end: u64,
+        read_start: usize,
+        read_end: usize,
+    ) -> Transcript {
+        Transcript {
+            chr_idx,
+            genome_start,
+            genome_end,
+            is_reverse: false,
+            exons: vec![crate::align::transcript::Exon {
+                genome_start,
+                genome_end,
+                read_start,
+                read_end,
+                i_frag: 0,
+            }],
+            cigar: Vec::new(),
+            score: 0,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: Vec::new(),
+            junction_annotated: Vec::new(),
+        }
+    }
     use crate::genome::Genome;
     use crate::index::packed_array::PackedArray;
     use crate::index::sa_index::SaIndex;
