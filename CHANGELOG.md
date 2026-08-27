@@ -42,6 +42,14 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Bug fixes
 
+- `Log.final.out` splits unmapped paired-end reads between `too short` and
+  `other` again. STAR calls a read `other` when no good window was found at
+  all and `too short` only when a window existed whose best transcript failed
+  the score or length thresholds (`ReadAlign_mappedFilter.cpp`); the
+  paired-end path reported every unmapped pair as `too short`, so the `other`
+  bucket was permanently zero. On the nf-core/rnaseq test data (50 000 pairs,
+  yeast chrI + GFP) this moves rustar from `too short 7374 / other 0` to
+  `too short 3778 / other 3596`, against STAR's `3766 / 3609`. Closes #48.
 - Read names are cut at `--readNameSeparator` (default `/`), as STAR does. A
   read named `foo/1` was previously emitted as `foo/1` where STAR emits `foo`.
 
