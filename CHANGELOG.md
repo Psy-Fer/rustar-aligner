@@ -50,6 +50,15 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Bug fixes
 
+- `--clipAdapterType CellRanger4` now uses STAR's own two rules instead of
+  approximations. The 5' TSO clip is an overlap alignment (`ClipCR4.cpp` +
+  `ClipMate_clipChunk.cpp`: match +1, mismatch -2, gap open/extend 2, keep
+  `endLocationTarget + 1` unless the score is below the floor), where it was a
+  fixed-length prefix comparison that could neither see a TSO starting partway
+  into the read nor reject a full-length match STAR scores too low. The 3'
+  poly-A trim is a port of `ClipCR4::polyTail3p`, a scored scan that walks
+  through sequencing errors, where it was a run of literal `A`s and so kept
+  roughly half of any tail carrying one error.
 - Read names are cut at `--readNameSeparator` (default `/`), as STAR does. A
   read named `foo/1` was previously emitted as `foo/1` where STAR emits `foo`.
 
