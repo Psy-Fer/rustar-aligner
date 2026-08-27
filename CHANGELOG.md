@@ -13,6 +13,21 @@ Sections commonly used: Features, Bug fixes, Other changes.
 
 ### Other changes
 
+- **Align batch size 10 000 → 1 000** (`ALIGN_BATCH_SIZE`, was a magic number
+  repeated in the four align pipelines). A batch is live end to end — decoded
+  reads in, SAM records out — and several are in flight at once, so peak RSS
+  scaled with it. Measured on a 50 Mb genome, 2 M SE 100 bp reads, 8 threads,
+  BAM output: wall 3.24 s → 2.43 s, user CPU 25.6 s → 17.5 s, peak RSS 1543 MB
+  → 669 MB. The CPU drop is the point: at 10 000 the batch working set no
+  longer fits in cache next to the per-read alignment scratch. Output is
+  byte-identical at every batch size tried.
+
+- FASTQ decode reads into one reusable `noodles` record instead of going
+  through `Reader::records()`, which allocates a record per call and yields a
+  clone of it — two extra copies of every sequence and quality string per read.
+  The read name is also cut at `--readNameSeparator` before being allocated
+  rather than allocated and then copied shorter.
+
 - `cluster_seeds` reuses its window-bin map across reads on a thread instead
   of rebuilding it per read. Merging two windows re-keys every bin in the
   merged span, so the per-read pre-sizing was only a floor and the map

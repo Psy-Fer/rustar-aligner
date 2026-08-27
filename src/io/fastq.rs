@@ -72,6 +72,11 @@ pub struct PairedRead {
 /// FASTQ reader that handles decompression and base encoding
 pub struct FastqReader {
     inner: fastq::io::Reader<Box<dyn BufRead + Send>>,
+    /// Scratch record reused across reads. `Reader::records()` allocates a fresh
+    /// record buffer per call and clones it out on every `next()`, so going
+    /// through the iterator cost two extra copies of the sequence and quality
+    /// bytes per read. Reading into one long-lived buffer keeps the capacity.
+    buf: fastq::Record,
     /// Signed shift applied to every input quality byte so the rest of the
     /// pipeline always sees Phred+33.
     ///
@@ -128,6 +133,7 @@ impl FastqReader {
 
         Ok(Self {
             inner: fastq_reader,
+            buf: fastq::Record::default(),
             qual_shift: 0,
             name_separators: vec![b'/'],
         })
@@ -171,48 +177,49 @@ impl FastqReader {
 
     /// Get next read with encoded bases
     pub fn next_encoded(&mut self) -> Result<Option<EncodedRead>, Error> {
-        match self.inner.records().next() {
-            Some(Ok(record)) => {
-                let name = std::str::from_utf8(record.name())
-                    .map_err(|e| {
-                        Error::from(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("invalid UTF-8 in read name: {e}"),
-                        ))
-                    })?
-                    .to_string();
-
-                let sequence = record.sequence().iter().map(|&b| encode_base(b)).collect();
-
-                let name = match self
-                    .name_separators
-                    .iter()
-                    .filter_map(|&sep| name.as_bytes().iter().position(|&b| b == sep))
-                    .min()
-                {
-                    Some(cut) => name[..cut].to_string(),
-                    None => name,
-                };
-
-                let quality = if self.qual_shift == 0 {
-                    record.quality_scores().to_vec()
-                } else {
-                    record
-                        .quality_scores()
-                        .iter()
-                        .map(|&b| (b as i32 + self.qual_shift).clamp(33, 126) as u8)
-                        .collect()
-                };
-
-                Ok(Some(EncodedRead {
-                    name,
-                    sequence,
-                    quality,
-                }))
-            }
-            Some(Err(e)) => Err(Error::from(e)),
-            None => Ok(None),
+        // Read straight into the reusable buffer (`read_record` clears it first). The `records()` iterator would
+        // allocate a record per call and hand back a clone of it, i.e. two extra
+        // copies of every sequence and quality string.
+        if self.inner.read_record(&mut self.buf).map_err(Error::from)? == 0 {
+            return Ok(None);
         }
+        let record = &self.buf;
+
+        // Cut at the first separator before allocating, so a trimmed name is one
+        // allocation rather than an allocation plus a shortened copy.
+        let raw_name = record.name();
+        let end = self
+            .name_separators
+            .iter()
+            .filter_map(|&sep| raw_name.iter().position(|&b| b == sep))
+            .min()
+            .unwrap_or(raw_name.len());
+        let name = std::str::from_utf8(&raw_name[..end])
+            .map_err(|e| {
+                Error::from(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid UTF-8 in read name: {e}"),
+                ))
+            })?
+            .to_string();
+
+        let sequence = record.sequence().iter().map(|&b| encode_base(b)).collect();
+
+        let quality = if self.qual_shift == 0 {
+            record.quality_scores().to_vec()
+        } else {
+            record
+                .quality_scores()
+                .iter()
+                .map(|&b| (b as i32 + self.qual_shift).clamp(33, 126) as u8)
+                .collect()
+        };
+
+        Ok(Some(EncodedRead {
+            name,
+            sequence,
+            quality,
+        }))
     }
 
     /// Read a batch of encoded reads for parallel processing

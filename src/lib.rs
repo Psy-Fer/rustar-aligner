@@ -47,6 +47,31 @@ use noodles::sam::alignment::record::cigar;
 
 use crate::params::{Parameters, RunMode};
 
+/// Reads decoded, aligned and written as one unit by the align pipelines.
+///
+/// The whole batch is live at once — decoded reads on the way in, their SAM
+/// records on the way out — and the pipeline keeps several in flight (a bounded
+/// channel per stage, plus one per rayon worker), so peak RSS scales with this
+/// number times the worker count, not with the input size.
+///
+/// It used to be 10 000. Measured on a 50 Mb genome, 2 M single-end 100 bp
+/// reads, 8 threads, BAM output (median of two runs):
+///
+/// | batch  | wall  | user CPU | peak RSS |
+/// |--------|-------|----------|----------|
+/// | 10 000 | 3.24s | 25.6s    | 1543 MB  |
+/// |  2 500 | 2.69s | 19.6s    |  811 MB  |
+/// |  1 000 | 2.43s | 17.5s    |  669 MB  |
+/// |    500 | 2.19s | 17.0s    |  660 MB  |
+///
+/// Smaller batches are not merely cheaper in memory, they are cheaper in CPU:
+/// a batch's working set has to fit in cache alongside the per-read alignment
+/// scratch, and at 10 000 it does not. The curve flattens below ~1 000, so that
+/// is the value here; going lower trades away the per-batch amortisation for
+/// nothing. Output is byte-identical at every batch size (verified on the 2 M
+/// read run: same BAM payload hash).
+const ALIGN_BATCH_SIZE: usize = 1000;
+
 /// Top-level dispatcher. Called from `main()` after CLI parsing.
 pub fn run(params: &Parameters) -> anyhow::Result<()> {
     info!("rustar-aligner {}", env!("CARGO_PKG_VERSION"));
@@ -1437,7 +1462,7 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
         params.read_map_number as u64
     };
 
-    let batch_size = 10000;
+    let batch_size = ALIGN_BATCH_SIZE;
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     // `--outSAMtype None` (e.g. quant-only) skips building SAM records.
     let emit_sam = params.emits_alignments();
@@ -2069,7 +2094,7 @@ fn align_reads_solo<W: AlignmentWriter + ?Sized>(
     } else {
         params.read_map_number as u64
     };
-    let batch_size = 10000;
+    let batch_size = ALIGN_BATCH_SIZE;
     let clip5p = params.clip5p(0);
     let clip3p = params.clip3p(0);
     let cr4_clip = params.clip_adapter_type == "CellRanger4";
@@ -2384,7 +2409,7 @@ fn align_reads_solo_pe<W: AlignmentWriter + ?Sized>(
     } else {
         params.read_map_number as u64
     };
-    let batch_size = 10000;
+    let batch_size = ALIGN_BATCH_SIZE;
     // Per-mate clip: mate 1 (--clip5pNbases[0], e.g. 39 to strip the 5' barcode
     // region) and mate 2 ([1], e.g. 0). CellRanger4 adapter clipping is not used
     // by the cellgeni 5' path (it uses clip5pNbases instead), so it is not applied.
@@ -2777,7 +2802,7 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
         params.read_map_number as u64
     };
 
-    let batch_size = 10000;
+    let batch_size = ALIGN_BATCH_SIZE;
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     // `--outSAMtype None` (e.g. quant-only) skips building SAM records.
     let emit_sam = params.emits_alignments();
