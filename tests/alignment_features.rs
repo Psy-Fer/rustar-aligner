@@ -102,7 +102,12 @@ fn build_index(fasta: &Path, genome_dir: &Path, sa_nbases: &str, gtf: Option<&Pa
         .arg("--genomeFastaFiles")
         .arg(fasta)
         .arg("--genomeSAindexNbases")
-        .arg(sa_nbases);
+        .arg(sa_nbases)
+        // Per-test prefix: genomeGenerate writes `<prefix>Log.out`, and the
+        // default `./` prefix would make concurrently running test
+        // processes share one file in the crate directory.
+        .arg("--outFileNamePrefix")
+        .arg(genome_dir.join("run_"));
     if let Some(g) = gtf {
         cmd.arg("--sjdbGTFfile")
             .arg(g)

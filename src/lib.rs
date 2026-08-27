@@ -141,15 +141,26 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
 
     // STAR writes `Log.out` to `<outFileNamePrefix>` during genomeGenerate
     // and copies it into the genome directory at the end, so a STAR-built
-    // index directory always contains one; mirror that.
-    let log_out_path = params.output_path("Log.out");
+    // index directory always contains one; mirror that. The genomeDir copy
+    // is a second independent write, not `fs::copy` from the prefix file:
+    // concurrent genomeGenerate processes sharing a working directory (the
+    // integration-test harness does this) race on `<prefix>Log.out`, and on
+    // Windows `CopyFileEx` opens its source without write sharing, turning
+    // that race into a sharing-violation error (os error 32). Two plain
+    // creates use share-all flags and cannot collide.
+    let time_finish = chrono::Local::now();
     crate::io::log::write_genome_generate_log(
-        &log_out_path,
+        &params.output_path("Log.out"),
         params,
         time_start,
-        chrono::Local::now(),
+        time_finish,
     )?;
-    std::fs::copy(&log_out_path, params.genome_dir.join("Log.out"))?;
+    crate::io::log::write_genome_generate_log(
+        &params.genome_dir.join("Log.out"),
+        params,
+        time_start,
+        time_finish,
+    )?;
 
     info!("Genome generation complete!");
     Ok(())
