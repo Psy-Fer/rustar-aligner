@@ -63,6 +63,26 @@ Adding a dependency — **especially a non-Rust one** (a C library via a `-sys` 
 
 If you add a CLI flag that parses but is not yet implemented, mark it as such in the parameter-surface test and document it — do not silently accept a flag that does nothing. A user passing a flag should never be quietly ignored.
 
+## Larger-scale differential
+
+The unit and integration suites use a synthetic micro-genome and finish in
+seconds. `test/nfcore_diff.py` covers what they cannot reach: mapping rates,
+the unmapped-reason buckets and the multimapper depth histogram, measured
+against STAR on the nf-core/rnaseq test dataset (50 000 paired reads,
+*S. cerevisiae* chrI plus the GFP transgene, fetched from public URLs and not
+vendored).
+
+```bash
+cargo build --release
+python3 test/nfcore_diff.py --report-only        # print the comparison
+python3 test/nfcore_diff.py                      # exit non-zero on a regression
+```
+
+In CI it is opt-in: the `Large-dataset differential` workflow runs on manual
+dispatch, or on a pull request carrying the `large-tests` label. The dispatch
+form takes a runner label, so it can be pointed at a bigger machine without
+editing the workflow.
+
 ## Test data
 
 Integration tests in `tests/` use a bundled synthetic micro-genome and need no downloads. The differential benchmark below uses a small **public** yeast RNA-seq dataset that is not vendored; fetch it once and point `DATA` at wherever you keep it.

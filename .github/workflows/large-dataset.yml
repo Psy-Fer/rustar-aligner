@@ -1,0 +1,71 @@
+name: Large-dataset differential
+
+# Deliberately not on every push: this job fetches a dataset, builds two
+# indexes and runs two aligners. It is opt-in, either by hand or by putting the
+# `large-tests` label on a pull request.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label (e.g. ubuntu-latest, or a scverse AWS runner group)"
+        required: false
+        default: "ubuntu-latest"
+      report_only:
+        description: "Report the comparison without failing the job"
+        type: boolean
+        required: false
+        default: false
+  pull_request:
+    types: [labeled, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nfcore-diff:
+    name: nf-core/rnaseq differential against STAR
+    # On a pull request this runs only when the `large-tests` label is present,
+    # so an unrelated PR never pays for it.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'large-tests')
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # ratchet:actions/checkout@v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # ratchet:dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # ratchet:Swatinem/rust-cache@v2.9.1
+
+      - name: Build rustar-aligner
+        run: cargo build --release
+
+      # STAR is packaged for Ubuntu; building it from source would triple the
+      # job's runtime for no gain in what is being measured.
+      - name: Install STAR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rna-star
+          STAR --version
+
+      - name: Differential run
+        run: >-
+          python3 test/nfcore_diff.py
+          --rustar ./target/release/rustar-aligner
+          --work "${RUNNER_TEMP}/nfcore"
+          --json "${RUNNER_TEMP}/nfcore-metrics.json"
+          ${{ (github.event.inputs.report_only == 'true') && '--report-only' || '' }}
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # ratchet:actions/upload-artifact@v4.6.2
+        with:
+          name: nfcore-metrics
+          path: ${{ runner.temp }}/nfcore-metrics.json
+          if-no-files-found: warn
