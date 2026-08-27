@@ -18,7 +18,6 @@ exclude = [
     "Dockerfile",
     ".dockerignore",
     "ROADMAP.md",
-    "CLAUDE.md",
 ]
 
 [[bin]]
