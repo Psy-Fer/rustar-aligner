@@ -20,7 +20,14 @@ Sections commonly used: Features, Bug fixes, Other changes.
   implementation built the SA in 172.953 s versus 267.592 s for its original
   0.7 baseline: 35.4% faster, with peak RSS reduced from 10,512,408 to
   9,169,892 KiB. The complete output hash was unchanged.
-
+- The splice-junction sorts that produce `SJ.out.tab`, the `SJ` solo-feature
+  rows and the `BySJout` survivor set now order on the whole key (chromosome,
+  start, end, strand, motif) rather than on coordinates alone. The counts come
+  from a `DashMap`, whose iteration order varies with hashing and with
+  concurrent insertion, so a tie left to that order would have been a file
+  that differs between runs or thread counts. `tests/determinism.rs` locks it:
+  the same reads at one and at eight threads, and two runs at eight threads,
+  produce byte-identical output in single-pass and two-pass mode. Answers #210.
 - `cluster_seeds` reuses its window-bin map across reads on a thread instead
   of rebuilding it per read. Merging two windows re-keys every bin in the
   merged span, so the per-read pre-sizing was only a floor and the map
