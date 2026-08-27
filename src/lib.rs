@@ -108,6 +108,8 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
         );
     }
 
+    let time_start = chrono::Local::now();
+
     info!("Building genome index (streaming SA + on-the-fly SAindex)...");
     // Streaming path: opens SA file early, packs each caps-sa emit
     // directly to disk + into the SAindex builder, never holding the
@@ -136,6 +138,18 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
         );
         GenomeIndex::generate_streaming(&orig_params)?;
     }
+
+    // STAR writes `Log.out` to `<outFileNamePrefix>` during genomeGenerate
+    // and copies it into the genome directory at the end, so a STAR-built
+    // index directory always contains one; mirror that.
+    let log_out_path = params.output_path("Log.out");
+    crate::io::log::write_genome_generate_log(
+        &log_out_path,
+        params,
+        time_start,
+        chrono::Local::now(),
+    )?;
+    std::fs::copy(&log_out_path, params.genome_dir.join("Log.out"))?;
 
     info!("Genome generation complete!");
     Ok(())
