@@ -79,7 +79,7 @@ On the 10k yeast PE benchmark, 4 reads differ in alignment score (AS) because ST
 
 **Impact.** rustar-aligner's result is the better alignment in each case. These are counted against exact faithfulness in the raw metric but are improvements, not regressions.
 
-**Source.** See `CLAUDE.md` (PE status) and `STAR-RS-COMPARISON.md`.
+**Source.** See `STAR-RS-COMPARISON.md`, and the PE benchmark section of `CONTRIBUTING.md`.
 
 ---
 
@@ -161,7 +161,7 @@ These are **not** deliberate divergences — they are tracked residual diffs on 
 - **1 STAR-only PE mate** — `ERR12389696.18919121`: an SA-level difference.
 - **1 rustar-aligner-only PE mate** — `ERR12389696.6302610`: a pre-existing false positive.
 
-See `CLAUDE.md` ("Known Issues" / "PE Status") for the current status of these.
+See `ROADMAP.md` and `STAR-RS-COMPARISON.md` for the current status of these.
 
 ---
 
