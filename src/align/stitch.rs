@@ -1155,6 +1155,7 @@ fn stitch_align_to_transcript(
     cluster: &SeedCluster,
     junction_db: Option<&crate::junction::SpliceJunctionDb>,
     align_mates_gap_max: u64,
+    jcache: &mut crate::align::score::JunctionScanCache,
     _debug_name: &str,
 ) -> Option<WorkingTranscript> {
     let last_exon = wt.exons.last().unwrap();
@@ -1393,7 +1394,8 @@ fn stitch_align_to_transcript(
         // is motif detection (splice) vs pure positional score (deletion).
         // donor_sa = exclusive end of exon A = STAR's gAend+1. jr_shift = STAR's jR.
         let donor_sa = last_exon.genome_end;
-        let (jr_shift, motif, motif_score, jj_l, jj_r) = scorer.find_best_junction_position(
+        let (jr_shift, motif, motif_score, jj_l, jj_r) = scorer.find_best_junction_position_cached(
+            jcache,
             read_seq,
             last_exon.read_end,
             donor_sa,
@@ -2205,6 +2207,7 @@ fn stitch_recurse(
     recursion_count: &mut u32,
     align_mates_gap_max: u64,
     original_is_reverse: bool,
+    jcache: &mut crate::align::score::JunctionScanCache,
     debug_name: &str,
 ) {
     const MAX_RECURSION: u32 = 100_000;
@@ -2453,6 +2456,7 @@ fn stitch_recurse(
             recursion_count,
             align_mates_gap_max,
             original_is_reverse,
+            jcache,
             debug_name,
         );
     } else {
@@ -2466,6 +2470,7 @@ fn stitch_recurse(
             cluster,
             junction_db,
             align_mates_gap_max,
+            jcache,
             debug_name,
         ) {
             stitch_recurse(
@@ -2482,6 +2487,7 @@ fn stitch_recurse(
                 recursion_count,
                 align_mates_gap_max,
                 original_is_reverse,
+                jcache,
                 debug_name,
             );
         }
@@ -2512,6 +2518,7 @@ fn stitch_recurse(
         recursion_count,
         align_mates_gap_max,
         original_is_reverse,
+        jcache,
         debug_name,
     );
 }
@@ -3119,6 +3126,10 @@ pub(crate) fn stitch_seeds_core(
     // last-anchor index to thread through here.
     let mut working_transcripts: Vec<WorkingTranscript> = Vec::new();
     let mut recursion_count: u32 = 0;
+    // One memo table per window. `stitch_read`, the genome and the strand are
+    // fixed for the whole recursion below, which is what makes the six-field
+    // key in `JunctionScanCache` a complete identifier for a scan.
+    let mut jcache = crate::align::score::JunctionScanCache::new();
 
     stitch_recurse(
         0,
@@ -3134,6 +3145,7 @@ pub(crate) fn stitch_seeds_core(
         &mut recursion_count,
         align_mates_gap_max,
         stitch_is_reverse,
+        &mut jcache,
         debug_read_name,
     );
 

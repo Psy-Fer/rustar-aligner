@@ -263,6 +263,57 @@ impl AlignmentScorer {
         }
     }
 
+    /// Memoized wrapper around [`AlignmentScorer::find_best_junction_position`].
+    ///
+    /// The scan is a pure function of its arguments. Within one window's stitch
+    /// recursion, `read_seq`, the genome, `is_reverse` and `n_genome` are fixed,
+    /// so the six remaining coordinates identify a scan completely.
+    /// `stitchWindowAligns`' include/exclude recursion reaches the same
+    /// (exon A end, seed B) pair through many different branch paths, so without
+    /// a memo the identical scan is repeated thousands of times per window.
+    /// Results are bit-identical to calling the uncached function.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_best_junction_position_cached(
+        &self,
+        cache: &mut JunctionScanCache,
+        read_seq: &[u8],
+        r_a_end: usize,
+        g_a_end: u64,
+        r_gap: i64,
+        g_gap: i64,
+        genome: &Genome,
+        is_reverse: bool,
+        n_genome: u64,
+        prev_exon_len: usize,
+        next_seed_len: usize,
+    ) -> (i32, SpliceMotif, i32, u32, u32) {
+        let key = JunctionScanKey {
+            r_a_end,
+            g_a_end,
+            r_gap,
+            g_gap,
+            prev_exon_len,
+            next_seed_len,
+        };
+        if let Some(hit) = cache.map.get(&key) {
+            return *hit;
+        }
+        let val = self.find_best_junction_position(
+            read_seq,
+            r_a_end,
+            g_a_end,
+            r_gap,
+            g_gap,
+            genome,
+            is_reverse,
+            n_genome,
+            prev_exon_len,
+            next_seed_len,
+        );
+        cache.map.insert(key, val);
+        val
+    }
+
     /// Find the optimal junction boundary position by scanning all candidates.
     ///
     /// STAR's jR scanning: given a gap between seeds A and B where gGap > rGap,
@@ -656,6 +707,37 @@ const fn build_motif_table() -> [SpliceMotif; 256] {
     t[motif_index(1, 3, 2, 1)] = SpliceMotif::CtGc;
     t[motif_index(2, 3, 0, 3)] = SpliceMotif::GtAt;
     t
+}
+
+/// Key for [`JunctionScanCache`]: the arguments of
+/// `find_best_junction_position` that vary within a single window's stitch
+/// recursion. Everything else (`read_seq`, the genome, `is_reverse`,
+/// `n_genome`) is loop-invariant there, so these six fields identify a scan
+/// exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct JunctionScanKey {
+    r_a_end: usize,
+    g_a_end: u64,
+    r_gap: i64,
+    g_gap: i64,
+    prev_exon_len: usize,
+    next_seed_len: usize,
+}
+
+/// Per-window memo table for the junction-position scan.
+///
+/// Create one per `stitch_seeds_core` call and pass it down the recursion; it
+/// must not outlive the read, genome and strand it was filled for; the
+/// per-window lifetime guarantees by construction.
+#[derive(Default)]
+pub struct JunctionScanCache {
+    map: rustc_hash::FxHashMap<JunctionScanKey, (i32, SpliceMotif, i32, u32, u32)>,
+}
+
+impl JunctionScanCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// Splice junction motif types
