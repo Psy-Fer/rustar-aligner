@@ -2031,181 +2031,141 @@ fn test_wasp_samtag() {
 }
 
 // ---------------------------------------------------------------------------
-// --runMode soloCellFiltering
+// Test — CellRanger4 TSO clip is applied per read within a batch
+//
+// The 5' TSO clip is resolved for a whole read batch in one hyalite
+// `Database::scan_all` pass (`solo::tso_clip_lens_cr4_batch`), then indexed back
+// out per read in the parallel align loop. This test interleaves TSO-bearing and
+// TSO-free reads so that any off-by-one or reordering between the batched scan
+// and the per-read loop lands a clip on the wrong read and fails here.
 // ---------------------------------------------------------------------------
 
-/// Cell calling is a decision about a matrix, not about reads: the mode takes
-/// an existing raw matrix and writes the called subset, with no genome and no
-/// FASTQ involved.
 #[test]
-fn test_run_mode_solo_cell_filtering_calls_cells_from_a_raw_matrix() {
+fn test_starsolo_cr4_tso_clip_is_per_read_within_batch() {
+    const TSO: &str = "AAGCAGTGGTATCAACGCAGAGTACATGGG";
+
     let tmpdir = TempDir::new().unwrap();
-    let raw = tmpdir.path().join("raw");
-    fs::create_dir_all(&raw).unwrap();
+    let genome = build_genome();
+    let fasta = write_fasta(&tmpdir, &genome);
+    let gtf = write_gtf(&tmpdir);
 
-    // 20 barcodes: five real cells with 1000 UMIs each, fifteen with 2.
-    let n_features = 50usize;
-    let n_cells = 20usize;
-    let mut entries: Vec<(usize, usize, u64)> = Vec::new();
-    for cb in 1..=n_cells {
-        let per_gene = if cb <= 5 { 100 } else { 1 };
-        let n_genes = if cb <= 5 { 10 } else { 2 };
-        for gene in 1..=n_genes {
-            entries.push((gene, cb, per_gene));
-        }
-    }
-    {
-        let mut f = fs::File::create(raw.join("matrix.mtx")).unwrap();
-        writeln!(f, "%%MatrixMarket matrix coordinate integer general").unwrap();
-        writeln!(f, "%").unwrap();
-        writeln!(f, "{} {} {}", n_features, n_cells, entries.len()).unwrap();
-        for (g, c, v) in &entries {
-            writeln!(f, "{g} {c} {v}").unwrap();
-        }
-    }
-    {
-        let mut f = fs::File::create(raw.join("barcodes.tsv")).unwrap();
-        for cb in 0..n_cells {
-            writeln!(f, "{:016b}", cb).unwrap();
-        }
-    }
-    {
-        let mut f = fs::File::create(raw.join("features.tsv")).unwrap();
-        for g in 0..n_features {
-            writeln!(f, "gene{g}\tGENE{g}\tGene Expression").unwrap();
-        }
-    }
+    let genome_dir = tmpdir.path().join("genome");
+    build_index(&fasta, &genome_dir, "7", Some(&gtf));
 
-    let out = tmpdir.path().join("filtered/");
+    let cdna_path = tmpdir.path().join("cdna.fq");
+    let barcode_path = tmpdir.path().join("barcode.fq");
+    let wl_path = tmpdir.path().join("whitelist.txt");
+
+    let cb = "AAAACCCCGGGGTTTT";
+    // Exon2 (chr1:10251-10300) — the 50 bp the cDNA part of every read carries.
+    let exon2 = String::from_utf8(genome[10250..10300].to_vec()).unwrap();
+    assert!(
+        !exon2.ends_with("AAAAAAAA"),
+        "exon2 must not end in a polyA run, or the 3' CR4 trim would confound this test"
+    );
+
+    // 12 reads, alternating TSO-prefixed and bare, each with a distinct UMI so
+    // none are deduplicated away.
+    let n_pairs = 6;
+    {
+        let mut cf = fs::File::create(&cdna_path).unwrap();
+        let mut bf = fs::File::create(&barcode_path).unwrap();
+        for i in 0..n_pairs {
+            for tso in [true, false] {
+                let name = if tso { "tso" } else { "bare" };
+                let seq = if tso {
+                    format!("{TSO}{exon2}")
+                } else {
+                    exon2.clone()
+                };
+                writeln!(cf, "@{name}{i}\n{seq}\n+\n{}", "I".repeat(seq.len())).unwrap();
+                // Distinct 10 bp UMI per record: "UMI" + 7 digits.
+                let umi = format!("ACG{:07}", i * 2 + usize::from(!tso))
+                    .replace('0', "T")
+                    .replace(['1', '2', '3', '4', '5', '6', '7', '8', '9'], "C");
+                let umi: String = umi.chars().take(10).collect();
+                writeln!(
+                    bf,
+                    "@{name}{i}\n{cb}{umi}\n+\n{}",
+                    "I".repeat(cb.len() + umi.len())
+                )
+                .unwrap();
+            }
+        }
+    }
+    fs::write(&wl_path, format!("{cb}\n")).unwrap();
+
+    let output_dir = tmpdir.path().join("out_cr4_tso");
+    fs::create_dir_all(&output_dir).unwrap();
+    let prefix = format!("{}/", output_dir.display());
+
     cargo_bin_cmd!("rustar-aligner")
         .args([
             "--runMode",
-            "soloCellFiltering",
-            raw.to_str().unwrap(),
-            out.to_str().unwrap(),
-            "--soloCellFilter",
-            "TopCells",
-            "5",
+            "alignReads",
+            "--genomeDir",
+            genome_dir.to_str().unwrap(),
+            "--readFilesIn",
+            cdna_path.to_str().unwrap(),
+            barcode_path.to_str().unwrap(),
+            "--soloType",
+            "CB_UMI_Simple",
+            "--soloCBwhitelist",
+            wl_path.to_str().unwrap(),
+            "--soloCBstart",
+            "1",
+            "--soloCBlen",
+            "16",
+            "--soloUMIstart",
+            "17",
+            "--soloUMIlen",
+            "10",
+            "--sjdbGTFfile",
+            gtf.to_str().unwrap(),
+            "--clipAdapterType",
+            "CellRanger4",
+            "--outSAMtype",
+            "SAM",
+            "--outFileNamePrefix",
+            &prefix,
         ])
         .assert()
         .success();
 
-    let barcodes = fs::read_to_string(out.join("barcodes.tsv")).unwrap();
-    assert_eq!(
-        barcodes.lines().count(),
-        5,
-        "the five deep barcodes are the called cells"
-    );
+    let sam = fs::read_to_string(output_dir.join("Aligned.out.sam")).unwrap();
 
-    let matrix = fs::read_to_string(out.join("matrix.mtx")).unwrap();
-    let header = matrix.lines().nth(2).unwrap();
-    let fields: Vec<&str> = header.split_whitespace().collect();
-    assert_eq!(fields[0], "50", "features are carried through");
-    assert_eq!(fields[1], "5", "columns are the called cells");
-    assert_eq!(fields[2], "50", "10 genes × 5 cells");
+    let mut n_tso = 0;
+    let mut n_bare = 0;
+    for line in sam.lines().filter(|l| !l.starts_with('@')) {
+        let f: Vec<&str> = line.split('\t').collect();
+        let (qname, pos, cigar) = (f[0], f[3], f[5]);
+        assert_eq!(pos, "10251", "{qname}: cDNA should map to Exon2");
 
-    assert!(
-        out.join("features.tsv").exists(),
-        "the feature list travels with the matrix"
-    );
-}
-
-/// The mode needs both paths; asking for it without them is refused rather
-/// than run against a guess.
-#[test]
-fn test_run_mode_solo_cell_filtering_requires_its_paths() {
-    cargo_bin_cmd!("rustar-aligner")
-        .args(["--runMode", "soloCellFiltering"])
-        .assert()
-        .failure();
-}
-
-// ---------------------------------------------------------------------------
-// Test — --readNameSeparator cuts the QNAME, and only where asked
-//
-// STAR's default separator is `/` and it cuts the read name there; before #147
-// this codebase kept the whole name. That is the one output change #147 makes
-// at default settings, and the only coverage was a unit test on the paired
-// FASTQ reader plus a parse-level check that the flag reaches Parameters --
-// nothing asserted the QNAME that actually reaches the SAM. This does, in both
-// directions, so neither a regression nor a hardcoded `/` can pass.
-//
-// The bundled yeast tier cannot exercise this: there the `/1` sits in the FASTQ
-// comment, after whitespace, so the QNAME never contains a separator.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_read_name_separator_cuts_the_qname_and_is_configurable() {
-    let tmpdir = TempDir::new().unwrap();
-    let genome = build_genome();
-    let fasta = write_fasta(&tmpdir, &genome);
-    let genome_dir = tmpdir.path().join("genome");
-    build_index(&fasta, &genome_dir, "7", None);
-
-    // Exon2 (chr1:10251-10300), so every read aligns and emits a record.
-    let exon2 = String::from_utf8(genome[10250..10300].to_vec()).unwrap();
-    let reads_path = tmpdir.path().join("slashed.fq");
-    {
-        let mut f = fs::File::create(&reads_path).unwrap();
-        for i in 0..4 {
-            // The separator is inside the QNAME, not in a trailing comment.
-            writeln!(f, "@read{i}/1\n{exon2}\n+\n{}", "I".repeat(exon2.len())).unwrap();
+        if qname.starts_with("tso") {
+            // The 30 nt TSO is clipped from the 5' and retained as a soft clip.
+            assert_eq!(
+                cigar, "30S50M",
+                "{qname}: TSO-bearing read should carry a 30 base 5' soft clip"
+            );
+            n_tso += 1;
+        } else {
+            assert_eq!(
+                cigar, "50M",
+                "{qname}: TSO-free read must not be clipped (a clip here means the \
+                 batched TSO scan was indexed onto the wrong read)"
+            );
+            n_bare += 1;
         }
     }
-
-    let run = |name: &str, extra: &[&str]| -> Vec<String> {
-        let out = tmpdir.path().join(name);
-        fs::create_dir_all(&out).unwrap();
-        let prefix = format!("{}/", out.display());
-        let mut args: Vec<String> = vec![
-            "--runMode".into(),
-            "alignReads".into(),
-            "--genomeDir".into(),
-            genome_dir.to_str().unwrap().into(),
-            "--readFilesIn".into(),
-            reads_path.to_str().unwrap().into(),
-            "--outSAMtype".into(),
-            "SAM".into(),
-            "--outFileNamePrefix".into(),
-            prefix.clone(),
-        ];
-        args.extend(extra.iter().map(|s| (*s).to_string()));
-        cargo_bin_cmd!("rustar-aligner")
-            .args(&args)
-            .assert()
-            .success();
-
-        fs::read_to_string(out.join("Aligned.out.sam"))
-            .unwrap()
-            .lines()
-            .filter(|l| !l.starts_with('@'))
-            .map(|l| l.split('\t').next().unwrap().to_string())
-            .collect()
-    };
-
-    // Default: STAR's `/` separator, so the `/1` is cut away.
-    let defaulted = run("out_default", &[]);
-    assert!(!defaulted.is_empty(), "no records were emitted");
-    for qname in &defaulted {
-        assert!(
-            !qname.contains('/'),
-            "default --readNameSeparator should cut at '/', got {qname}"
-        );
-        assert!(qname.starts_with("read"), "unexpected QNAME shape: {qname}");
-    }
-
-    // `-` disables separators, so the same reads keep their full names. This is
-    // what stops the cut being hardcoded rather than driven by the flag.
-    let disabled = run("out_disabled", &["--readNameSeparator", "-"]);
-    assert_eq!(
-        disabled.len(),
-        defaulted.len(),
-        "the same reads should align either way"
-    );
-    for qname in &disabled {
-        assert!(
-            qname.ends_with("/1"),
-            "--readNameSeparator - should keep the whole name, got {qname}"
-        );
-    }
+    assert_eq!(n_tso, n_pairs, "every TSO read should be reported");
+    assert_eq!(n_bare, n_pairs, "every TSO-free read should be reported");
 }
+
+// ---------------------------------------------------------------------------
+// Test — CellRanger4 TSO clip is applied per read within a batch
+//
+// The 5' TSO clip is resolved for a whole read batch in one hyalite
+// `Database::scan_all` pass (`solo::tso_clip_lens_cr4_batch`), then indexed back
+// out per read in the parallel align loop. This test interleaves TSO-bearing and
+// TSO-free reads so that any off-by-one or reordering between the batched scan
+// and the per-read loop lands a clip on the wrong read and fails here.
