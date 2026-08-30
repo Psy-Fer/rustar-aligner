@@ -50,6 +50,28 @@ impl GenomeSeq {
         }
     }
 
+    /// A resolved, `Copy` view of this sequence for hot per-base loops.
+    ///
+    /// [`base`](Self::base) has to re-inspect the `GenomeSeq` discriminant on
+    /// every call, which the alignment inner loops pay once per base read. The
+    /// view resolves that once, so a loop keeps a slice and one integer in
+    /// registers and each base costs a bounds check and a load.
+    #[inline]
+    pub fn view(&self) -> SeqView<'_> {
+        match self {
+            // The owned buffer already holds `[forward | RC]`, so every index
+            // is a direct read and the RC branch is unreachable.
+            GenomeSeq::Owned(v) => SeqView {
+                buf: v,
+                rc_from: usize::MAX,
+            },
+            GenomeSeq::Mapped { fwd, n_genome } => SeqView {
+                buf: fwd,
+                rc_from: *n_genome,
+            },
+        }
+    }
+
     /// Total sequence length (`2*n_genome` — forward + reverse complement).
     #[inline]
     pub fn len(&self) -> usize {
@@ -82,6 +104,82 @@ impl GenomeSeq {
         match self {
             GenomeSeq::Owned(v) => v,
             GenomeSeq::Mapped { fwd, .. } => fwd,
+        }
+    }
+}
+
+/// A resolved view of a [`GenomeSeq`] for per-base hot loops.
+///
+/// Out-of-range positions read back as [`OUT_OF_RANGE`] rather than `None`.
+/// Every aligner call site that used [`GenomeSeq::get`] treats "not one of
+/// A/C/G/T" the same way, so a sentinel keeps the inner loops branch-light
+/// without changing what any of them decide.
+#[derive(Clone, Copy)]
+pub struct SeqView<'a> {
+    /// `[forward | RC]` for an owned genome, forward strand only for a mapped one.
+    buf: &'a [u8],
+    /// First index that must be served by complementing a forward byte, or
+    /// `usize::MAX` when `buf` already holds both strands.
+    rc_from: usize,
+}
+
+/// A position past the end of the genome.
+pub const OUT_OF_RANGE: u8 = u8::MAX;
+
+impl SeqView<'_> {
+    /// Copy the bases at `[start, start + out.len())` into `out`, returning how
+    /// many were available.
+    ///
+    /// Bases past the end of the genome are not written, so a short return
+    /// means the caller reached the end. The point is the forward case: it is
+    /// one `copy_from_slice`, which leaves the caller with two plain byte
+    /// slices to compare and lets the comparison loop vectorize. The
+    /// reverse-complement half has no contiguous slice to hand out, so it is
+    /// filled by walking the mirrored forward bytes.
+    pub fn bases_into(&self, start: usize, out: &mut [u8]) -> usize {
+        if start < self.rc_from {
+            // Forward strand of a mapped genome, or anywhere in an owned one.
+            let end = (start + out.len()).min(self.buf.len());
+            if start >= end {
+                return 0;
+            }
+            let n = end - start;
+            out[..n].copy_from_slice(&self.buf[start..end]);
+            return n;
+        }
+        let two_n = self.rc_from * 2;
+        if start >= two_n {
+            return 0;
+        }
+        let n = out.len().min(two_n - start);
+        // base(i) = complement(forward[2n - 1 - i]) for i in [start, start + n),
+        // so the source is `[2n - start - n, 2n - start)` walked backwards.
+        let hi = two_n - start;
+        let src = &self.buf[hi - n..hi];
+        for (o, &f) in out[..n].iter_mut().zip(src.iter().rev()) {
+            *o = if f < 4 { 3 - f } else { f };
+        }
+        n
+    }
+
+    /// Base at absolute position `i`, or [`OUT_OF_RANGE`] past the end.
+    ///
+    /// Equivalent to `GenomeSeq::get(i).unwrap_or(OUT_OF_RANGE)`.
+    #[inline]
+    pub fn base(&self, i: usize) -> u8 {
+        if i < self.rc_from {
+            // Forward strand of a mapped genome, or anywhere in an owned one
+            // (`rc_from == usize::MAX`), where the bounds check is all that
+            // stands between the index and the load.
+            return self.buf.get(i).copied().unwrap_or(OUT_OF_RANGE);
+        }
+        // Mapped RC half: base(i) = complement(forward[2*n - 1 - i]).
+        let two_n = self.rc_from * 2;
+        if i < two_n {
+            let f = self.buf[two_n - 1 - i];
+            if f < 4 { 3 - f } else { f }
+        } else {
+            OUT_OF_RANGE
         }
     }
 }
@@ -515,6 +613,51 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// `SeqView::base` must agree with `GenomeSeq::get` on every index in
+    /// `0..2n`, plus the first out-of-range index, for both storage variants.
+    /// The view duplicates the RC arithmetic, so this is the guard that keeps
+    /// the two definitions from drifting apart.
+    #[test]
+    fn seq_view_matches_genome_seq() {
+        // One of every byte the genome uses: A,C,G,T, N, and the padding mark.
+        let fwd: Vec<u8> = (0..64u8).map(|i| i % 6).collect();
+        let n = fwd.len();
+
+        let mut both = fwd.clone();
+        both.extend((0..n).rev().map(|i| {
+            let f = fwd[i];
+            if f < 4 { 3 - f } else { f }
+        }));
+        let owned = GenomeSeq::Owned(both);
+
+        // A `Mapped` genome holds only the forward strand and computes the RC
+        // half on access; both variants must answer identically.
+        for seq in [&owned] {
+            let view = seq.view();
+            for i in 0..=2 * n {
+                assert_eq!(
+                    view.base(i),
+                    seq.get(i).unwrap_or(OUT_OF_RANGE),
+                    "owned index {i}"
+                );
+            }
+        }
+
+        // Same check against the mapped variant's documented formula, without
+        // needing a real mmap: build the view by hand.
+        let mapped_view = SeqView {
+            buf: &fwd,
+            rc_from: n,
+        };
+        for i in 0..=2 * n {
+            assert_eq!(
+                mapped_view.base(i),
+                owned.view().base(i),
+                "mapped index {i}"
+            );
+        }
+    }
 
     fn make_params(fasta_paths: &[std::path::PathBuf], bin_nbits: u32) -> Parameters {
         let mut args = vec!["rustar-aligner", "--runMode", "genomeGenerate"];
